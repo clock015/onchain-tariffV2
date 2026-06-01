@@ -52,7 +52,12 @@ interface IMarket {
      * 5. 为 merchant 增加 9% amount 的卖方积分。
      * 6. 为 buyer 和 merchant 各铸造 1% amount 的权利 Token。
      */
-    function trade(address buyer, address merchant, uint256 amount) external;
+    function trade(
+        address buyer,
+        address merchant,
+        uint256 amount,
+        bytes calldata data
+    ) external;
 
     /**
      * @notice 积分对冲退税

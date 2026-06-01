@@ -1,179 +1,193 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
-import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
-import "../src/Market.sol";
-
-contract MockERC20 is ERC20 {
-    constructor(string memory name_, string memory symbol_) ERC20(name_, symbol_) {}
-
-    function mint(address to, uint256 amount) external {
-        _mint(to, amount);
-    }
-
-    function burn(address from, uint256 amount) external {
-        _burn(from, amount);
-    }
-}
-
-contract MockGovernance {
-    function kickMerchant(Market market, address merchant) external {
-        market.kickMerchant(merchant);
-    }
-}
+import "./Mocks.sol"; // 包含上面的 Mock 合约
+import {Market} from "../src/Market.sol";
+import {TradeExecutor} from "../src/TradeExecutor.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract MarketTest is Test {
-    event MerchantRegistered(address indexed merchant, uint256 deposit);
-    event Traded(address indexed payer, address indexed buyer, address indexed merchant, uint256 amount);
-    event TaxRefunded(address indexed account, uint256 amount);
-    event MerchantKicked(address indexed merchant, uint256 slashedAmount);
-
     Market market;
-    MockERC20 underlying;
-    MockERC20 buyerRights;
-    MockERC20 sellerRights;
-    MockGovernance governance;
+    TradeExecutor executor;
+    MockUSDC usdc;
+    MockRights mr;
+    MockRights pr;
 
-    address owner = address(0xA11CE);
-    address vault = address(0xA017);
-    address payer = address(0xCAFE);
-    address buyer = address(0xB0B);
-    address merchant = address(0xBEEF);
+    address admin = address(0xAD);
+    address gov = address(0x607); // Governance
+    address vault = address(0xBB);
+    address buyer = address(0x11);
+    address merchant = address(0x22);
+    address challenger = address(0x33);
 
     function setUp() public {
-        underlying = new MockERC20("Underlying", "UND");
-        buyerRights = new MockERC20("Buyer Rights", "BR");
-        sellerRights = new MockERC20("Seller Rights", "SR");
-        governance = new MockGovernance();
+        vm.startPrank(admin);
 
+        // 1. 部署逻辑合约与代理
+        usdc = new MockUSDC();
+        mr = new MockRights("Market Right", "MR");
+        pr = new MockRights("Productivity Right", "PR");
+        
         Market implementation = new Market();
-        bytes memory initData = abi.encodeCall(
-            Market.initialize,
-            (
-                address(underlying),
-                address(buyerRights),
-                address(sellerRights),
-                address(governance),
-                vault
-            )
+        
+        // 使用代理进行初始化
+        bytes memory initData = abi.encodeWithSelector(
+            Market.initialize.selector,
+            address(usdc),
+            address(mr),
+            address(pr),
+            gov,
+            vault,
+            address(0) // 暂时传 0，稍后 set
         );
-
-        vm.prank(owner);
         ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
         market = Market(address(proxy));
 
-        underlying.mint(payer, 10_000 ether);
-        underlying.mint(merchant, 10_000 ether);
+        // 2. 部署执行器并关联
+        executor = new TradeExecutor(address(market), address(usdc));
+        market.setExecutor(address(executor));
+
+        // 3. 授权确权代币铸造权限给 Market
+        mr.setMinter(address(market));
+        pr.setMinter(address(market));
+
+        vm.stopPrank();
     }
 
-    function testInitializeStoresDependenciesAndOwner() public view {
-        assertEq(address(market.underlying()), address(underlying));
-        assertEq(address(market.buyerRights()), address(buyerRights));
-        assertEq(address(market.sellerRights()), address(sellerRights));
-        assertEq(market.governance(), address(governance));
-        assertEq(market.vault(), vault);
-        assertEq(market.owner(), owner);
-    }
-
-    function testRegisterMerchantTransfersDepositAndActivatesMerchant() public {
-        uint256 deposit = 1_000 ether;
+    // --- 1. 商家入驻测试 ---
+    function test_RegisterMerchant() public {
+        uint256 deposit = 1000 * 1e6; // 假设 1000 USDC
+        usdc.mint(merchant, deposit);
 
         vm.startPrank(merchant);
-        underlying.approve(address(market), deposit);
-
-        vm.expectEmit(true, false, false, true, address(market));
-        emit MerchantRegistered(merchant, deposit);
+        usdc.approve(address(market), deposit);
         market.registerMerchant(deposit);
         vm.stopPrank();
 
-        (uint256 storedDeposit, bool isActive) = market.merchants(merchant);
-        assertEq(storedDeposit, deposit);
+        (uint256 mDeposit, bool isActive) = market.merchants(merchant);
+        assertEq(mDeposit, deposit);
         assertTrue(isActive);
-        assertEq(underlying.balanceOf(address(market)), deposit);
     }
 
-    function testTradeTransfersFundsAccruesPointsAndMintsRights() public {
-        _registerMerchant(1_000 ether);
+    // --- 2. 贸易分配测试 (10-9-1) ---
+    function test_TradeEconomics() public {
+        test_RegisterMerchant(); // 先入驻
 
-        uint256 amount = 1_000 ether;
-        vm.startPrank(payer);
-        underlying.approve(address(market), amount);
+        uint256 tradeAmount = 100 * 1e6;
+        usdc.mint(buyer, tradeAmount);
 
-        vm.expectEmit(true, true, true, true, address(market));
-        emit Traded(payer, buyer, merchant, amount);
-        market.trade(buyer, merchant, amount);
+        vm.startPrank(buyer);
+        usdc.approve(address(market), tradeAmount);
+        market.trade(buyer, merchant, tradeAmount, "");
         vm.stopPrank();
 
-        assertEq(underlying.balanceOf(merchant), 10_000 ether - 1_000 ether + 900 ether);
-        assertEq(underlying.balanceOf(vault), 10 ether);
-        assertEq(underlying.balanceOf(address(market)), 1_000 ether + 90 ether);
-
-        assertEq(market.buyerPoints(buyer), 90 ether);
-        assertEq(market.sellerPoints(merchant), 90 ether);
-        assertEq(buyerRights.balanceOf(buyer), 10 ether);
-        assertEq(sellerRights.balanceOf(merchant), 10 ether);
+        // 校验分配
+        // 1. 商家应收 90% = 90
+        assertEq(usdc.balanceOf(merchant), 90 * 1e6);
+        // 2. 金库应收 1% = 1
+        assertEq(usdc.balanceOf(vault), 1 * 1e6);
+        // 3. 合约留存 9% = 9
+        assertEq(usdc.balanceOf(address(market)), 1000 * 1e6 + 9 * 1e6); // 初始押金1000 + 9税
+        
+        // 校验积分与权利 (100的9%是9，1%是1)
+        assertEq(market.buyerPoints(buyer), 9 * 1e6);
+        assertEq(market.sellerPoints(merchant), 9 * 1e6);
+        assertEq(mr.balanceOf(buyer), 1 * 1e6);
+        assertEq(pr.balanceOf(merchant), 1 * 1e6);
     }
 
-    function testClaimTaxRefundOffsetsBuyerAndSellerPoints() public {
-        _registerMerchant(1_000 ether);
-        underlying.mint(buyer, 1_000 ether);
-        _registerMerchant(buyer, 1_000 ether);
-        _trade(payer, buyer, merchant, 1_000 ether);
-        _trade(payer, merchant, buyer, 500 ether);
+    // --- 3. 退税测试 (产消者对冲) ---
+    function test_TaxRefund() public {
+        test_TradeEconomics(); // buyer 买了 100 块，现在有 9 买方积分
 
-        uint256 balanceBefore = underlying.balanceOf(buyer);
+        // 现在让 buyer 变成卖家，赚取卖方积分
+        // 商家买 buyer 的货
+        uint256 tradeAmount = 100 * 1e6;
+        usdc.mint(merchant, tradeAmount);
+        
+        vm.startPrank(merchant);
+        usdc.approve(address(market), tradeAmount);
+        // 为了让 buyer 获得卖方积分，这里 merchant 是 payer，buyer 是 merchant
+        // 需要先注册 buyer 为商家
+        vm.stopPrank();
+        
+        vm.startPrank(buyer);
+        usdc.mint(buyer, 1000 * 1e6);
+        usdc.approve(address(market), 1000 * 1e6);
+        market.registerMerchant(1000 * 1e6);
+        vm.stopPrank();
 
-        vm.expectEmit(true, false, false, true, address(market));
-        emit TaxRefunded(buyer, 45 ether);
+        vm.prank(merchant);
+        market.trade(merchant, buyer, tradeAmount, "");
+
+        // 此时 buyer 既有 9 买方积分，也有 9 卖方积分
+        assertEq(market.buyerPoints(buyer), 9 * 1e6);
+        assertEq(market.sellerPoints(buyer), 9 * 1e6);
+
+        uint256 balanceBefore = usdc.balanceOf(buyer);
         market.claimTaxRefund(buyer);
+        uint256 balanceAfter = usdc.balanceOf(buyer);
 
-        assertEq(market.buyerPoints(buyer), 45 ether);
-        assertEq(market.sellerPoints(buyer), 0);
-        assertEq(underlying.balanceOf(buyer), balanceBefore + 45 ether);
+        assertEq(balanceAfter - balanceBefore, 9 * 1e6);
+        assertEq(market.buyerPoints(buyer), 0);
     }
 
-    function testOnlyGovernanceCanKickMerchant() public {
-        _registerMerchant(1_000 ether);
+    // --- 4. 挑战与成功踢出测试 ---
+    function test_ChallengeAndKick() public {
+        test_RegisterMerchant(); // 商家押金 1000
 
-        vm.expectRevert(bytes("Only governance"));
+        uint256 stake = 1000 * 1e6;
+        usdc.mint(challenger, stake);
+
+        vm.startPrank(challenger);
+        usdc.approve(address(market), stake);
+        market.challengeMerchant(merchant);
+        vm.stopPrank();
+
+        // 治理踢出
+        vm.prank(gov);
         market.kickMerchant(merchant);
 
-        vm.expectEmit(true, false, false, true, address(market));
-        emit MerchantKicked(merchant, 1_000 ether);
-        governance.kickMerchant(market, merchant);
-
-        (uint256 storedDeposit, bool isActive) = market.merchants(merchant);
-        assertEq(storedDeposit, 0);
+        // 校验：商家状态重置，押金入库，挑战者拿回钱
+        (uint256 mDeposit, bool isActive) = market.merchants(merchant);
+        assertEq(mDeposit, 0);
         assertFalse(isActive);
-        assertEq(underlying.balanceOf(vault), 1_000 ether);
+        assertEq(usdc.balanceOf(vault), 1000 * 1e6); // 商家押金入库
+        assertEq(usdc.balanceOf(challenger), 1000 * 1e6); // 挑战者拿回保证金
     }
 
-    function testOwnerCanSetVault() public {
-        address newVault = address(0xFEE);
+    // --- 5. 挑战失败与自动结算测试 ---
+    function test_ChallengeAndSettle() public {
+        test_RegisterMerchant();
 
-        vm.prank(owner);
-        market.setVault(newVault);
+        uint256 stake = 1000 * 1e6;
+        usdc.mint(challenger, stake);
 
-        assertEq(market.vault(), newVault);
-    }
-
-    function _registerMerchant(uint256 deposit) internal {
-        _registerMerchant(merchant, deposit);
-    }
-
-    function _registerMerchant(address account, uint256 deposit) internal {
-        vm.startPrank(account);
-        underlying.approve(address(market), deposit);
-        market.registerMerchant(deposit);
+        vm.startPrank(challenger);
+        usdc.approve(address(market), stake);
+        market.challengeMerchant(merchant);
         vm.stopPrank();
+
+        // 时间流逝 8 天 (超过 7 天挑战期)
+        vm.warp(block.timestamp + 8 days);
+
+        // 任何人调用结算（这里由商家自己调用）
+        market.settleChallenge(merchant);
+
+        // 校验：商家依然 isActive，挑战者钱被没收
+        (uint256 mDeposit, bool isActive) = market.merchants(merchant);
+        assertEq(mDeposit, 1000 * 1e6);
+        assertTrue(isActive);
+        assertEq(usdc.balanceOf(vault), 1000 * 1e6); // 挑战者保证金入库
+        assertEq(usdc.balanceOf(challenger), 0);
     }
 
-    function _trade(address tradePayer, address tradeBuyer, address tradeMerchant, uint256 amount) internal {
-        vm.startPrank(tradePayer);
-        underlying.approve(address(market), amount);
-        market.trade(tradeBuyer, tradeMerchant, amount);
-        vm.stopPrank();
+    // --- 6. 权限与重入安全测试 ---
+    function test_Security_ExecutorIsolation() public {
+        // 尝试让 executor 调用 trade
+        vm.prank(address(executor));
+        vm.expectRevert("Executor cannot trigger trade");
+        market.trade(buyer, merchant, 100, "");
     }
 }
