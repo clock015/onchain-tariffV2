@@ -33,6 +33,7 @@ contract Market is
     struct Merchant {
         uint256 deposit;
         bool isActive;
+        address beneficiary; // 注册后不可修改
     }
 
     struct Challenge {
@@ -56,7 +57,11 @@ contract Market is
     }
 
     // --- 事件 ---
-    event MerchantRegistered(address indexed merchant, uint256 deposit);
+    event MerchantRegistered(
+        address indexed merchant,
+        address indexed beneficiary,
+        uint256 deposit
+    );
     event Traded(
         address indexed payer,
         address indexed buyer,
@@ -105,15 +110,29 @@ contract Market is
 
     // --- 核心业务 ---
 
-    function registerMerchant(uint256 amount) external {
+    /**
+     * @notice 商家缴纳押金入驻
+     * @param amount 押金金额
+     * @param beneficiary 永久绑定的受益人地址（用于接收积分和权利 Token）
+     */
+    function registerMerchant(uint256 amount, address beneficiary) external {
         require(amount > 0, "Deposit required");
-        // 使用 safeTransferFrom
+        require(beneficiary != address(0), "Invalid beneficiary");
+        // 如果是重新入驻或追加押金，受益人必须保持一致（或新注册）
+        if (merchants[msg.sender].beneficiary != address(0)) {
+            require(
+                merchants[msg.sender].beneficiary == beneficiary,
+                "Beneficiary mismatch"
+            );
+        }
+
         underlying.safeTransferFrom(msg.sender, address(this), amount);
 
         merchants[msg.sender].deposit += amount;
         merchants[msg.sender].isActive = true;
+        merchants[msg.sender].beneficiary = beneficiary;
 
-        emit MerchantRegistered(msg.sender, amount);
+        emit MerchantRegistered(msg.sender, beneficiary, amount);
     }
 
     function trade(
@@ -122,29 +141,27 @@ contract Market is
         uint256 amount,
         bytes calldata data
     ) external nonReentrant notFromExecutor {
-        require(merchants[merchant].isActive, "Merchant not active");
+        Merchant storage m = merchants[merchant];
+        require(m.isActive, "Merchant not active");
+
+        address beneficiary = m.beneficiary; // 提取受益人地址
 
         uint256 taxTotal = amount / 10;
         uint256 vaultFee = amount / 100;
         uint256 merchantProceeds = amount - taxTotal;
         uint256 pointsAmount = (amount * 9) / 100;
 
-        // 1. 资金归集（从付款人处扣除 100%）
         underlying.safeTransferFrom(msg.sender, address(this), amount);
-
-        // 2. 分配 1% 入金库
         underlying.safeTransfer(vault, vaultFee);
 
-        // 3. 确权与积分
+        // 记账给受益人
         buyerPoints[buyer] += pointsAmount;
-        sellerPoints[merchant] += pointsAmount;
+        sellerPoints[beneficiary] += pointsAmount;
 
         buyerRights.mint(buyer, vaultFee);
-        sellerRights.mint(merchant, vaultFee);
+        sellerRights.mint(beneficiary, vaultFee);
 
-        // 4. 将 90% 资金拨付给 Executor 并触发执行
         underlying.safeTransfer(executor, merchantProceeds);
-
         ITradeExecutor(executor).executeTrade(merchant, merchantProceeds, data);
 
         emit Traded(msg.sender, buyer, merchant, amount);

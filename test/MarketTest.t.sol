@@ -171,11 +171,13 @@ contract MarketTest is Test {
     function testMerchantRegistration() public {
         vm.startPrank(bob);
         usdc.approve(address(market), 1000e6);
-        market.registerMerchant(1000e6);
+        market.registerMerchant(1000e6, bob);
 
-        (uint256 deposit, bool isActive) = market.merchants(bob);
+        (uint256 deposit, bool isActive, address beneficiary) = market
+            .merchants(bob);
         assertEq(deposit, 1000e6);
         assertTrue(isActive);
+        assertEq(beneficiary, bob);
         vm.stopPrank();
     }
 
@@ -186,7 +188,7 @@ contract MarketTest is Test {
 
         vm.startPrank(address(merchantContract));
         usdc.approve(address(market), 1000e6);
-        market.registerMerchant(1000e6);
+        market.registerMerchant(1000e6, address(merchantContract));
         vm.stopPrank();
 
         // ------------------ 差值测试开始 ------------------
@@ -258,7 +260,7 @@ contract MarketTest is Test {
         // 为了退税，Alice 需要作为卖家再赚 100e6 的交易（产生 9e6 卖方积分，实现对冲）
         vm.startPrank(alice);
         usdc.approve(address(market), 1000e6);
-        market.registerMerchant(1000e6);
+        market.registerMerchant(1000e6, alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
@@ -282,7 +284,7 @@ contract MarketTest is Test {
         usdc.mint(address(merchantContract), 1000e6);
         vm.startPrank(address(merchantContract));
         usdc.approve(address(market), 1000e6);
-        market.registerMerchant(1000e6);
+        market.registerMerchant(1000e6, address(merchantContract));
         vm.stopPrank();
 
         // 2. Alice 交易 (产生买卖双方积分和治理代币)
