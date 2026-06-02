@@ -62,7 +62,7 @@ contract MarketTest is Test {
         buyerFactory = new SeatTokenFactory();
         sellerFactory = new SeatTokenFactory();
 
-        // 3. 部署 ProportionalElection (使用代理模式)
+        // 3. 部署 ProportionalElection 代理
         ProportionalElection buyerElectionImpl = new ProportionalElection();
         bytes memory buyerElectionInit = abi.encodeWithSelector(
             ProportionalElection.initialize.selector,
@@ -94,36 +94,42 @@ contract MarketTest is Test {
         buyerFactory.setElectionContract(address(buyerElection));
         sellerFactory.setElectionContract(address(sellerElection));
 
-        // 5. 部署 Market (使用代理模式)
+        // =============================================================
+        // 新的第 5 步：提前部署 TimelockController
+        // 因为 Market 的初始化需要治理地址
+        // =============================================================
+        address[] memory proposers = new address[](1);
+        proposers[0] = admin; // 初始设为 admin，后续 Governor 部署后会把 Governor 加上去
+        address[] memory executorsGov = new address[](1);
+        executorsGov[0] = address(0); // 允许任何人执行
+
+        timelock = new TimelockController(0, proposers, executorsGov, admin);
+
+        // =============================================================
+        // 新的第 6 步：部署 Market (此时 timelock 地址已知)
+        // =============================================================
         Market marketImpl = new Market();
         bytes memory marketInitData = abi.encodeWithSelector(
             Market.initialize.selector,
             address(usdc),
             address(buyerElection),
             address(sellerElection),
-            admin,
+            address(timelock), // ！！！关键修改：治理地址直接设为 Timelock
             vault
         );
         market = Market(
             address(new ERC1967Proxy(address(marketImpl), marketInitData))
         );
 
-        // 6. 部署执行器
+        // 7. 部署执行器
         executor = new TradeExecutor(address(market), address(usdc));
         market.setExecutor(address(executor));
 
-        // 7. 授权 Market 权限
+        // 8. 授权 Market 权限
         buyerElection.setMinter(address(market));
         sellerElection.setMinter(address(market));
 
-        // 8. 部署治理中心
-        address[] memory proposers = new address[](1);
-        proposers[0] = admin;
-        address[] memory executorsGov = new address[](1);
-        executorsGov[0] = address(0);
-
-        timelock = new TimelockController(0, proposers, executorsGov, admin);
-
+        // 9. 部署治理合约 FinalGovernor
         FinalGovernor governorImpl = new FinalGovernor();
         bytes memory govInitData = abi.encodeWithSelector(
             FinalGovernor.initialize.selector,
@@ -138,25 +144,22 @@ contract MarketTest is Test {
         );
 
         // =============================================================
-        // 9. 权限移交：将所有权从 admin 移交给 Timelock
+        // 10. 权限移交 (Ownership Handover)
         // =============================================================
 
-        // 移交 Market 的 Owner 权限（控制 setVault, setExecutor 和 UUPS 升级）
+        // A. 移交所有权
         market.transferOwnership(address(timelock));
-
-        // 移交选举聚合器的 Owner 权限（控制 setMinter 和 UUPS 升级）
         buyerElection.transferOwnership(address(timelock));
         sellerElection.transferOwnership(address(timelock));
-
-        // 移交工厂的 Owner 权限（控制 setElectionContract）
         buyerFactory.transferOwnership(address(timelock));
         sellerFactory.transferOwnership(address(timelock));
 
-        // 特别注意：Market 内部还有一个 governance 地址变量，用于 kickMerchant
-        // 我们需要确保 Market 的 governance 变量也指向 Timelock（因为 Timelock 是提案执行者）
-        // 如果你的 Market initialize 传的是 admin，这里可以通过测试手段验证或在 initialize 时改掉
+        // B. 治理角色配置：让 Governor 成为 Timelock 的提案者
+        // 之前我们在构造函数里把 admin 设为了 proposer，现在把真正的 Governor 也加进去
+        timelock.grantRole(timelock.PROPOSER_ROLE(), address(governor));
+        timelock.grantRole(timelock.CANCELLER_ROLE(), address(governor));
 
-        // 撤销 admin 在 Timelock 上的临时管理权限（生产环境建议）
+        // C. 彻底去中心化
         timelock.renounceRole(timelock.DEFAULT_ADMIN_ROLE(), admin);
 
         vm.stopPrank();
