@@ -7,28 +7,32 @@ import "@openzeppelin/contracts-upgradeable/utils/NoncesUpgradeable.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+// 1. 引入 UUPS 升级模块
+import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import "../interfaces/ISeatToken.sol";
 import "../interfaces/ISeatTokenFactory.sol";
 
 /**
  * @title ProportionalElection
- * @notice 动态权重治理聚合器 - 准备好支持 UUPS
+ * @notice 动态权重治理聚合器 - 完全支持 UUPS 可升级模式
  */
 contract ProportionalElection is
     Initializable,
     IVotes,
     EIP712Upgradeable,
     NoncesUpgradeable,
-    OwnableUpgradeable
+    OwnableUpgradeable,
+    // 2. 继承 UUPS 接口
+    UUPSUpgradeable
 {
-    // --- 常量 (常量可以留在代码中，不占用存储槽) ---
+    // --- 常量 (不占用存储槽) ---
     uint256 public constant CYCLE_DURATION = 365 days;
     uint256 public constant BUFFER_DURATION = 30 days;
     uint256 public constant WEIGHT_PER_YEAR = 100 * 1e18;
     uint256 public constant MAX_ACTIVE_ROUNDS = 5;
 
-    // --- 状态变量 (移除 immutable，改用普通变量) ---
+    // --- 状态变量 ---
     ISeatTokenFactory public seatFactory;
     uint256 public genesisTime;
     address public minter;
@@ -60,13 +64,12 @@ contract ProportionalElection is
 
     /**
      * @notice 初始化函数
-     * @param _factory 席位代币工厂地址
-     * @param _initialMinter 初始铸造权限地址（如管理员或 Market）
      */
     function initialize(
         address _factory,
         address _initialMinter
     ) public initializer {
+        // 3. 调用各基类的初始化
         __Ownable_init(msg.sender);
         __EIP712_init("ProportionalElection", "1");
         __Nonces_init();
@@ -75,6 +78,12 @@ contract ProportionalElection is
         minter = _initialMinter;
         genesisTime = block.timestamp;
     }
+
+    // 4. 必须实现此函数以支持 UUPS 升级授权
+    // 只有 Owner 可以升级此合约
+    function _authorizeUpgrade(
+        address newImplementation
+    ) internal override onlyOwner {}
 
     /**
      * @notice 设置新的铸造执行者地址
@@ -87,7 +96,7 @@ contract ProportionalElection is
     }
 
     // =============================================================
-    //                      核心逻辑 (基本保持不变)
+    //                      核心逻辑 (保持不变)
     // =============================================================
 
     function mint(address to, uint256 amount) external {
@@ -146,7 +155,6 @@ contract ProportionalElection is
         return (amount * WEIGHT_PER_YEAR) / supply;
     }
 
-    // IVotes 聚合实现
     function getVotes(address account) public view override returns (uint256) {
         (uint256 start, uint256 end) = getActiveRange(block.timestamp);
         if (start > end) return 0;
@@ -194,7 +202,6 @@ contract ProportionalElection is
         return activeCount * WEIGHT_PER_YEAR;
     }
 
-    // 委派逻辑保持不变...
     function delegate(address delegatee) public override {
         _delegate(msg.sender, delegatee);
     }

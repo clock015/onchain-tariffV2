@@ -137,6 +137,28 @@ contract MarketTest is Test {
             )
         );
 
+        // =============================================================
+        // 9. 权限移交：将所有权从 admin 移交给 Timelock
+        // =============================================================
+
+        // 移交 Market 的 Owner 权限（控制 setVault, setExecutor 和 UUPS 升级）
+        market.transferOwnership(address(timelock));
+
+        // 移交选举聚合器的 Owner 权限（控制 setMinter 和 UUPS 升级）
+        buyerElection.transferOwnership(address(timelock));
+        sellerElection.transferOwnership(address(timelock));
+
+        // 移交工厂的 Owner 权限（控制 setElectionContract）
+        buyerFactory.transferOwnership(address(timelock));
+        sellerFactory.transferOwnership(address(timelock));
+
+        // 特别注意：Market 内部还有一个 governance 地址变量，用于 kickMerchant
+        // 我们需要确保 Market 的 governance 变量也指向 Timelock（因为 Timelock 是提案执行者）
+        // 如果你的 Market initialize 传的是 admin，这里可以通过测试手段验证或在 initialize 时改掉
+
+        // 撤销 admin 在 Timelock 上的临时管理权限（生产环境建议）
+        timelock.renounceRole(timelock.DEFAULT_ADMIN_ROLE(), admin);
+
         vm.stopPrank();
 
         usdc.mint(alice, INITIAL_BALANCE);
