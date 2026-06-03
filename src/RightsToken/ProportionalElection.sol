@@ -248,7 +248,7 @@ contract ProportionalElection is
     function clock() public view returns (uint48) {
         return uint48(block.timestamp);
     }
-    function CLOCK_MODE() public view returns (string memory) {
+    function CLOCK_MODE() public pure returns (string memory) {
         return "mode=timestamp";
     }
     function nonces(address owner) public view override returns (uint256) {

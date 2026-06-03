@@ -48,7 +48,7 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes {
     function clock() public view override returns (uint48) {
         return uint48(block.timestamp);
     }
-    function CLOCK_MODE() public view override returns (string memory) {
+    function CLOCK_MODE() public pure override returns (string memory) {
         return "mode=timestamp";
     }
 }
