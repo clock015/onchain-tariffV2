@@ -123,7 +123,19 @@ contract DeploySystem is Script {
         vm.stopBroadcast();
 
         console.log("Deployment Successful. Market:", address(market));
+        console.log("Underlying Token:", address(underlyingToken));
+        console.log("Buyer Election:", address(buyerElection));
+        console.log("Seller Election:", address(sellerElection));
+        console.log("Vault:", address(vault));
         console.log("Governor:", address(governor));
         console.log("Timelock:", address(timelock));
     }
 }
+
+/*
+forge script script/Deploy.s.sol:DeploySystem \
+  --rpc-url http://127.0.0.1:8545 \
+  --broadcast \
+  --via-ir \
+  -vvvv
+*/

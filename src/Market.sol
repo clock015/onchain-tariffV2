@@ -45,6 +45,7 @@ contract Market is
     mapping(address => Merchant) public merchants;
     mapping(address => uint256) public buyerPoints;
     mapping(address => uint256) public sellerPoints;
+    mapping(address => uint256) public claimed;
     mapping(address => Challenge) public challenges;
     uint256 public challengePeriod;
 
@@ -176,6 +177,7 @@ contract Market is
 
         buyerPoints[account] -= refundable;
         sellerPoints[account] -= refundable;
+        claimed[account] += refundable; // 记录已领取的部分
 
         // 使用 safeTransfer
         underlying.safeTransfer(account, refundable);
