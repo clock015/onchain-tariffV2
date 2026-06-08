@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/governance/utils/IVotes.sol";
 
 interface ISeatToken is IERC20, IVotes {
     function mint(address to, uint256 amount) external;
-    // 新增：允许授权地址（核心合约）同步委派
+    // 新增：销毁功能
+    function burn(address from, uint256 amount) external;
     function forceDelegate(address delegator, address delegatee) external;
 }

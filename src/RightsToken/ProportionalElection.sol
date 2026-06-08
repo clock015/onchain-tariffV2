@@ -55,6 +55,11 @@ contract ProportionalElection is
         address indexed to,
         uint256 amount
     );
+    event SeatBurned(
+        uint256 indexed roundId,
+        address indexed from,
+        uint256 amount
+    );
     event MinterChanged(address indexed oldMinter, address indexed newMinter);
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -115,6 +120,30 @@ contract ProportionalElection is
         }
 
         emit SeatMinted(rId, to, amount);
+    }
+
+    /**
+     * @notice 销毁指定地址在“最新活跃轮次”中的席位代币
+     * @dev 只能由 Owner（治理合约/Timelock）调用
+     * @param from 被处罚的地址
+     * @param amount 销毁的数量
+     */
+    function burn(address from, uint256 amount) external onlyOwner {
+        (, uint256 endId) = getActiveRange(block.timestamp);
+
+        address token = rounds[endId].seatToken;
+
+        // 鲁棒性检查：如果系统处于最开始的 30 天，可能没有任何活跃轮次
+        require(
+            token != address(0),
+            "ProportionalElection: no active round token to burn"
+        );
+
+        // 调用底层 SeatToken 的销毁函数
+        ISeatToken(token).burn(from, amount);
+
+        // 触发销毁事件，记录实际执行的轮次 ID
+        emit SeatBurned(endId, from, amount);
     }
 
     function _initializeRound(uint256 rId) internal {

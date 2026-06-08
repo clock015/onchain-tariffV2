@@ -24,6 +24,11 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes {
         }
     }
 
+    function burn(address from, uint256 amount) external {
+        require(msg.sender == minter, "Only minter");
+        _burn(from, amount);
+    }
+
     // 新增：由核心合约调用的同步委派
     function forceDelegate(address delegator, address delegatee) external {
         require(msg.sender == minter, "Only minter");
