@@ -157,7 +157,7 @@ contract Market is
 
         // 记账给受益人
         buyerPoints[buyer] += pointsAmount;
-        sellerPoints[beneficiary] += pointsAmount;
+        sellerPoints[merchant] += pointsAmount;
 
         buyerRights.mint(buyer, vaultFee);
         sellerRights.mint(beneficiary, vaultFee);
@@ -169,6 +169,14 @@ contract Market is
     }
 
     function claimTaxRefund(address account) external {
+        address target;
+        Merchant storage m = merchants[account];
+        if (m.beneficiary != address(0)) {
+            target = m.beneficiary; // 如果是商家，钱给受益人
+        } else {
+            target = account; // 如果是普通用户，钱给自己
+        }
+
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
 
@@ -180,7 +188,7 @@ contract Market is
         claimed[account] += refundable; // 记录已领取的部分
 
         // 使用 safeTransfer
-        underlying.safeTransfer(account, refundable);
+        underlying.safeTransfer(target, refundable);
 
         emit TaxRefunded(account, refundable);
     }
@@ -227,6 +235,19 @@ contract Market is
 
         uint256 merchantDeposit = merchants[merchant].deposit;
         uint256 challengerStake = c.stake;
+
+        // --- 修改点 3：精准没收该商家的积分 ---
+        uint256 bP = buyerPoints[merchant];
+        uint256 sP = sellerPoints[merchant];
+
+        if (bP > 0) {
+            buyerPoints[merchant] = 0;
+            buyerPoints[vault] += bP; // 没收至金库
+        }
+        if (sP > 0) {
+            sellerPoints[merchant] = 0;
+            sellerPoints[vault] += sP; // 没收至金库
+        }
 
         // 1. 状态清理
         merchants[merchant].isActive = false;

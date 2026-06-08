@@ -202,7 +202,7 @@ contract MarketAuto is
 
         // 3. 积分账本更新 (deltaS 为本次交易的关税额，也是顺差积分增量)
         buyerPoints[buyer] += deltaS;
-        sellerPoints[m.beneficiary] += deltaS;
+        sellerPoints[merchant] += deltaS;
 
         // 4. 权利代币铸造 (基于 1% 固定税)
         buyerRights.mint(buyer, vaultFee);
@@ -220,6 +220,14 @@ contract MarketAuto is
      * @dev 积分减少会降低 S，在 K 不变的情况下，自动增加商家的虚拟现金提取额度 R。
      */
     function claimTaxRefund(address account) external {
+        address target;
+        Merchant storage m = merchants[account];
+        if (m.beneficiary != address(0)) {
+            target = m.beneficiary; // 如果是商家，钱给受益人
+        } else {
+            target = account; // 如果是普通用户，钱给自己
+        }
+
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
 
@@ -230,7 +238,7 @@ contract MarketAuto is
         sellerPoints[account] -= refundable;
         claimed[account] += refundable;
 
-        underlying.safeTransfer(account, refundable);
+        underlying.safeTransfer(target, refundable);
         emit TaxRefunded(account, refundable);
     }
 
@@ -246,6 +254,19 @@ contract MarketAuto is
         require(m.isActive, "Merchant not active");
 
         uint256 slashedAmount = m.deposit;
+
+        // --- 修改点 3：精准没收该商家的积分 ---
+        uint256 bP = buyerPoints[merchant];
+        uint256 sP = sellerPoints[merchant];
+
+        if (bP > 0) {
+            buyerPoints[merchant] = 0;
+            buyerPoints[vault] += bP; // 没收至金库
+        }
+        if (sP > 0) {
+            sellerPoints[merchant] = 0;
+            sellerPoints[vault] += sP; // 没收至金库
+        }
 
         // 清理商家状态
         m.isActive = false;
