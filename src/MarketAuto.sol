@@ -46,6 +46,12 @@ contract MarketAuto is
 
     address public executor;
 
+    mapping(address => uint256) public lastClaimTime;
+    mapping(address => uint256) public lastAvailableQuota;
+
+    uint256 public constant QUOTA_PERIOD = 30 days;
+    uint256 public quotaRatio = 10000;
+
     // --- 权限与检查 ---
     modifier notFromExecutor() {
         require(msg.sender != executor, "Executor cannot trigger trade");
@@ -225,19 +231,51 @@ contract MarketAuto is
      * @notice 积分对冲退税
      * @dev 积分减少会降低 S，在 K 不变的情况下，自动增加商家的虚拟现金提取额度 R。
      */
-    function claimTaxRefund(address account) external {
+    function claimTaxRefund(address account) external nonReentrant {
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
 
-        uint256 refundable = bP < sP ? bP : sP;
-        require(refundable > 0, "No refundable points");
+        uint256 totalRefundable = bP < sP ? bP : sP;
+        require(totalRefundable > 0, "No refundable points");
 
-        buyerPoints[account] -= refundable;
-        sellerPoints[account] -= refundable;
-        claimed[account] += refundable;
+        uint256 availableQuota = getAvailableQuota(account);
+        require(availableQuota > 0, "Quota exhausted, wait for recovery");
 
-        underlying.safeTransfer(account, refundable);
-        emit TaxRefunded(account, refundable);
+        uint256 actualClaim = totalRefundable > availableQuota
+            ? availableQuota
+            : totalRefundable;
+
+        lastAvailableQuota[account] = availableQuota - actualClaim;
+        lastClaimTime[account] = block.timestamp;
+
+        buyerPoints[account] -= actualClaim;
+        sellerPoints[account] -= actualClaim;
+        claimed[account] += actualClaim;
+
+        underlying.safeTransfer(account, actualClaim);
+        emit TaxRefunded(account, actualClaim);
+    }
+
+    function getAvailableQuota(address account) public view returns (uint256) {
+        uint256 deposit = merchants[account].deposit;
+        if (deposit == 0) return 0;
+
+        uint256 maxQuota = (deposit * quotaRatio) / 10000;
+
+        if (lastClaimTime[account] == 0) {
+            return maxQuota;
+        }
+
+        uint256 timePassed = block.timestamp - lastClaimTime[account];
+
+        if (timePassed >= QUOTA_PERIOD) {
+            return maxQuota;
+        }
+
+        uint256 recovered = (maxQuota * timePassed) / QUOTA_PERIOD;
+        uint256 total = lastAvailableQuota[account] + recovered;
+
+        return total > maxQuota ? maxQuota : total;
     }
 
     // --- 权限管理与治理 ---
@@ -283,5 +321,9 @@ contract MarketAuto is
 
     function setExecutor(address _executor) external onlyOwner {
         executor = _executor;
+    }
+
+    function setQuotaParams(uint256 _newRatio) external onlyOwner {
+        quotaRatio = _newRatio;
     }
 }
