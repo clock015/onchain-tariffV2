@@ -51,6 +51,12 @@ contract Market is
 
     address public executor;
 
+    mapping(address => uint256) public lastClaimTime; // 上次提款时间戳
+    mapping(address => uint256) public lastAvailableQuota; // 上次结算后剩余的可用配额
+
+    uint256 public constant QUOTA_PERIOD = 30 days; // 配额完全恢复的周期
+    uint256 public quotaRatio = 10000; // 配额比例 (10000/10000 * deposit)
+
     // 安全检查：不允许执行器自调用以绕过税收逻辑
     modifier notFromExecutor() {
         require(msg.sender != executor, "Executor cannot trigger trade");
@@ -175,21 +181,69 @@ contract Market is
         emit Traded(msg.sender, buyer, merchant, amount);
     }
 
-    function claimTaxRefund(address account) external {
+    function claimTaxRefund(address account) external nonReentrant {
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
 
-        uint256 refundable = bP < sP ? bP : sP;
-        require(refundable > 0, "No refundable points");
+        // 原始应退金额
+        uint256 totalRefundable = bP < sP ? bP : sP;
+        require(totalRefundable > 0, "No refundable points");
 
-        buyerPoints[account] -= refundable;
-        sellerPoints[account] -= refundable;
-        claimed[account] += refundable; // 记录已领取的部分
+        // 获取当前时间点的可用配额
+        uint256 availableQuota = getAvailableQuota(account);
+        require(availableQuota > 0, "Quota exhausted, wait for recovery");
 
-        // 使用 safeTransfer
-        underlying.safeTransfer(account, refundable);
+        // 取 [应退金额] 和 [可用配额] 的最小值
+        uint256 actualClaim = totalRefundable > availableQuota
+            ? availableQuota
+            : totalRefundable;
 
-        emit TaxRefunded(account, refundable);
+        // --- 更新状态 ---
+        // 1. 更新配额结余：当前的可用额度减去本次消耗的额度
+        lastAvailableQuota[account] = availableQuota - actualClaim;
+        // 2. 更新时间戳
+        lastClaimTime[account] = block.timestamp;
+
+        // 3. 扣减积分
+        buyerPoints[account] -= actualClaim;
+        sellerPoints[account] -= actualClaim;
+        claimed[account] += actualClaim;
+
+        // 4. 转账
+        underlying.safeTransfer(account, actualClaim);
+
+        emit TaxRefunded(account, actualClaim);
+    }
+
+    /**
+     * @notice 计算当前用户可用的提款配额上限
+     * @dev 逻辑：上次剩余配额 + (时间流逝 / 周期) * 最大配额
+     */
+    function getAvailableQuota(address account) public view returns (uint256) {
+        uint256 deposit = merchants[account].deposit;
+        if (deposit == 0) return 0;
+
+        // 最大总配额 = 押金 * 比例
+        uint256 maxQuota = (deposit * quotaRatio) / 10000;
+
+        // 如果从未提款，初始配额为满额
+        if (lastClaimTime[account] == 0) {
+            return maxQuota;
+        }
+
+        uint256 timePassed = block.timestamp - lastClaimTime[account];
+
+        // 如果时间超过一个月，直接返回最大配额
+        if (timePassed >= QUOTA_PERIOD) {
+            return maxQuota;
+        }
+
+        // 计算这段时间内恢复的额度: (maxQuota * timePassed) / QUOTA_PERIOD
+        uint256 recovered = (maxQuota * timePassed) / QUOTA_PERIOD;
+        uint256 total = lastAvailableQuota[account] + recovered;
+
+        // 不能超过最大配额上限
+        return total > maxQuota ? maxQuota : total;
     }
 
     // --- 权限管理 ---
@@ -290,5 +344,9 @@ contract Market is
 
     function setExecutor(address _executor) external onlyOwner {
         executor = _executor;
+    }
+
+    function setQuotaParams(uint256 _newRatio) external onlyOwner {
+        quotaRatio = _newRatio;
     }
 }
