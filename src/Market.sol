@@ -33,7 +33,7 @@ contract Market is
     struct Merchant {
         uint256 deposit;
         bool isActive;
-        address beneficiary; // 注册后不可修改
+        address interactionTarget;
     }
 
     struct Challenge {
@@ -60,7 +60,7 @@ contract Market is
     // --- 事件 ---
     event MerchantRegistered(
         address indexed merchant,
-        address indexed beneficiary,
+        address indexed interactionTarget,
         uint256 deposit
     );
     event Traded(
@@ -114,16 +114,19 @@ contract Market is
     /**
      * @notice 商家缴纳押金入驻
      * @param amount 押金金额
-     * @param beneficiary 永久绑定的受益人地址（用于接收积分和权利 Token）
+     * @param interactionTarget 交互目标地址
      */
-    function registerMerchant(uint256 amount, address beneficiary) external {
+    function registerMerchant(
+        uint256 amount,
+        address interactionTarget
+    ) external {
         require(amount > 0, "Deposit required");
-        require(beneficiary != address(0), "Invalid beneficiary");
-        // 如果是重新入驻或追加押金，受益人必须保持一致（或新注册）
-        if (merchants[msg.sender].beneficiary != address(0)) {
+        require(interactionTarget != address(0), "Invalid target");
+        // 如果是重新入驻或追加押金，交互目标必须保持一致（或新注册）
+        if (merchants[msg.sender].interactionTarget != address(0)) {
             require(
-                merchants[msg.sender].beneficiary == beneficiary,
-                "Beneficiary mismatch"
+                merchants[msg.sender].interactionTarget == interactionTarget,
+                "Interaction target mismatch"
             );
         }
 
@@ -131,9 +134,9 @@ contract Market is
 
         merchants[msg.sender].deposit += amount;
         merchants[msg.sender].isActive = true;
-        merchants[msg.sender].beneficiary = beneficiary;
+        merchants[msg.sender].interactionTarget = interactionTarget;
 
-        emit MerchantRegistered(msg.sender, beneficiary, amount);
+        emit MerchantRegistered(msg.sender, interactionTarget, amount);
     }
 
     function trade(
@@ -145,7 +148,7 @@ contract Market is
         Merchant storage m = merchants[merchant];
         require(m.isActive, "Merchant not active");
 
-        address beneficiary = m.beneficiary; // 提取受益人地址
+        address interactionTarget = m.interactionTarget; // 提取交互目标地址
 
         uint256 taxTotal = amount / 10;
         uint256 vaultFee = amount / 100;
@@ -160,23 +163,19 @@ contract Market is
         sellerPoints[merchant] += pointsAmount;
 
         buyerRights.mint(buyer, vaultFee);
-        sellerRights.mint(beneficiary, vaultFee);
+        sellerRights.mint(merchant, vaultFee);
 
         underlying.safeTransfer(executor, merchantProceeds);
-        ITradeExecutor(executor).executeTrade(merchant, merchantProceeds, data);
+        ITradeExecutor(executor).executeTrade(
+            interactionTarget,
+            merchantProceeds,
+            data
+        );
 
         emit Traded(msg.sender, buyer, merchant, amount);
     }
 
     function claimTaxRefund(address account) external {
-        address target;
-        Merchant storage m = merchants[account];
-        if (m.beneficiary != address(0)) {
-            target = m.beneficiary; // 如果是商家，钱给受益人
-        } else {
-            target = account; // 如果是普通用户，钱给自己
-        }
-
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
 
@@ -188,7 +187,7 @@ contract Market is
         claimed[account] += refundable; // 记录已领取的部分
 
         // 使用 safeTransfer
-        underlying.safeTransfer(target, refundable);
+        underlying.safeTransfer(account, refundable);
 
         emit TaxRefunded(account, refundable);
     }

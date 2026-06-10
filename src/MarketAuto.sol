@@ -36,7 +36,7 @@ contract MarketAuto is
         uint256 deposit; // D: 押金
         uint256 K; // K: 恒定乘积系数
         bool isActive; // 是否激活
-        address beneficiary; // 收益人地址
+        address interactionTarget; // 交互地址
     }
 
     mapping(address => Merchant) public merchants;
@@ -55,7 +55,7 @@ contract MarketAuto is
     // --- 事件 ---
     event MerchantRegistered(
         address indexed merchant,
-        address indexed beneficiary,
+        address indexed interactionTarget,
         uint256 deposit,
         uint256 K
     );
@@ -115,7 +115,7 @@ contract MarketAuto is
         uint256 amount
     ) public view returns (uint256 deltaW, uint256 deltaS) {
         Merchant storage m = merchants[merchant];
-        uint256 S = _getSurplus(m.beneficiary);
+        uint256 S = _getSurplus(merchant);
         uint256 D = m.deposit;
 
         // Y = S + 0.9D 虚拟积分深度
@@ -144,17 +144,23 @@ contract MarketAuto is
 
     /**
      * @notice 商家缴纳押金入驻或追加押金
-     * @param beneficiary 收益人地址，注册后不可更改。
+     * @param interactionTarget 交互地址，注册后不可更改。
      */
-    function registerMerchant(uint256 amount, address beneficiary) external {
+    function registerMerchant(
+        uint256 amount,
+        address interactionTarget
+    ) external {
         require(amount > 0, "Deposit required");
-        require(beneficiary != address(0), "Invalid beneficiary");
+        require(interactionTarget != address(0), "Invalid interactionTarget");
 
         Merchant storage m = merchants[msg.sender];
-        uint256 S = _getSurplus(beneficiary);
+        uint256 S = _getSurplus(msg.sender);
 
         if (m.isActive) {
-            require(m.beneficiary == beneficiary, "Beneficiary mismatch");
+            require(
+                m.interactionTarget == interactionTarget,
+                "Interaction target mismatch"
+            );
 
             // 重新计算 K 以保持已收现 W 的连续性
             uint256 Y_old = S + ((m.deposit * 9) / 10);
@@ -166,14 +172,14 @@ contract MarketAuto is
             m.K = (10 * m.deposit - currentW) * Y_new;
         } else {
             m.isActive = true;
-            m.beneficiary = beneficiary;
+            m.interactionTarget = interactionTarget;
             m.deposit = amount;
             // 初始 K = (10D - 0) * (S + 0.9D)
             m.K = (10 * amount) * (S + ((amount * 9) / 10));
         }
 
         underlying.safeTransferFrom(msg.sender, address(this), amount);
-        emit MerchantRegistered(msg.sender, beneficiary, m.deposit, m.K);
+        emit MerchantRegistered(msg.sender, interactionTarget, m.deposit, m.K);
     }
 
     /**
@@ -206,7 +212,7 @@ contract MarketAuto is
 
         // 4. 权利代币铸造 (基于 1% 固定税)
         buyerRights.mint(buyer, vaultFee);
-        sellerRights.mint(m.beneficiary, vaultFee);
+        sellerRights.mint(merchant, vaultFee);
 
         // 5. 拨付现金至执行器并触发后续逻辑
         underlying.safeTransfer(executor, deltaW);
@@ -220,14 +226,6 @@ contract MarketAuto is
      * @dev 积分减少会降低 S，在 K 不变的情况下，自动增加商家的虚拟现金提取额度 R。
      */
     function claimTaxRefund(address account) external {
-        address target;
-        Merchant storage m = merchants[account];
-        if (m.beneficiary != address(0)) {
-            target = m.beneficiary; // 如果是商家，钱给受益人
-        } else {
-            target = account; // 如果是普通用户，钱给自己
-        }
-
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
 
@@ -238,7 +236,7 @@ contract MarketAuto is
         sellerPoints[account] -= refundable;
         claimed[account] += refundable;
 
-        underlying.safeTransfer(target, refundable);
+        underlying.safeTransfer(account, refundable);
         emit TaxRefunded(account, refundable);
     }
 
