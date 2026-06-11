@@ -142,7 +142,11 @@ contract Market is
         uint256 root = FixedPointMathLib.sqrt(discriminant);
 
         // 根据求根公式求得 deltaS (积分增量/动态关税)
-        deltaS = (root - uint256(int256(b))) / 2;
+        if (b >= 0) {
+            deltaS = (root - uint256(b)) / 2;
+        } else {
+            deltaS = (root + uint256(-b)) / 2;
+        }
 
         if (deltaS > P) deltaS = P;
         deltaW = P - deltaS;
