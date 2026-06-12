@@ -11,6 +11,11 @@ import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import "./interfaces/ITradeExecutor.sol";
 import "./interfaces/IRightsToken.sol";
 
+/**
+ * @title 原子贸易核心 Market 合约 (AMM 动态关税版)
+ * @notice 采用 (10D - W)(S + 0.9D) = K 公式实现路径无关的动态关税系统。
+ * @dev 移除了挑战逻辑，由治理模块 (Governor) 直接管理商家违规踢出。
+ */
 contract Market is
     Initializable,
     OwnableUpgradeable,
@@ -29,17 +34,15 @@ contract Market is
 
     struct Merchant {
         uint256 deposit; // D: 押金
-        bool isActive;
-        address interactionTarget;
-        uint256 W; // W: 已提现现金总额 (实际业务意义)
-        uint256 leverageFactor; // 商家快照杠杆 (100基准)
-        uint256 virtualDepthRatio; // 商家快照深度比例 (10000基准)
+        bool isActive; // 是否激活
+        address interactionTarget; // 交互地址
+        uint256 K; // K: 恒定乘积系数
     }
 
     mapping(address => Merchant) public merchants;
     mapping(address => uint256) public buyerPoints;
     mapping(address => uint256) public sellerPoints;
-    mapping(address => uint256) public claimed;
+    mapping(address => uint256) public claimed; // 记录累计退税金额
 
     address public executor;
 
@@ -47,11 +50,7 @@ contract Market is
     mapping(address => uint256) public lastAvailableQuota;
 
     uint256 public QUOTA_PERIOD;
-    uint256 public quotaRatio;
-
-    // --- 全局默认参数 ---
-    uint256 public leverageFactor; // 默认杠杆 (例如 1000 代表 10倍)
-    uint256 public virtualDepthRatio; // 默认比例 (例如 9000 代表 0.9)
+    uint256 public quotaRatio; // 配额比例 (10000/10000 * deposit)
 
     // --- 权限与检查 ---
     modifier notFromExecutor() {
@@ -64,7 +63,7 @@ contract Market is
         address indexed merchant,
         address indexed interactionTarget,
         uint256 deposit,
-        uint256 W
+        uint256 K
     );
     event Traded(
         address indexed payer,
@@ -77,6 +76,7 @@ contract Market is
     event TaxRefunded(address indexed account, uint256 amount);
     event MerchantKicked(address indexed merchant, uint256 slashedAmount);
 
+    /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
     }
@@ -95,9 +95,7 @@ contract Market is
         governance = _governance;
         vault = _vault;
         QUOTA_PERIOD = 30 days;
-        quotaRatio = 5000;
-        leverageFactor = 1000;
-        virtualDepthRatio = 9000;
+        quotaRatio = 10000; // 默认配额比例为 100%
     }
 
     function _authorizeUpgrade(
@@ -106,6 +104,9 @@ contract Market is
 
     // --- 核心数学逻辑 ---
 
+    /**
+     * @dev 获取当前顺差积分 S (SellerPoints - BuyerPoints)
+     */
     function _getSurplus(address account) internal view returns (uint256) {
         uint256 sP = sellerPoints[account];
         uint256 bP = buyerPoints[account];
@@ -113,23 +114,9 @@ contract Market is
     }
 
     /**
-     * @dev 同步商家参数快照。因为存储的是 W，同步时无需重新计算 W。
-     */
-    function _syncMerchantParams(address merchant) internal {
-        Merchant storage m = merchants[merchant];
-        if (!m.isActive) return;
-        if (
-            m.leverageFactor == leverageFactor &&
-            m.virtualDepthRatio == virtualDepthRatio
-        ) return;
-
-        m.leverageFactor = leverageFactor;
-        m.virtualDepthRatio = virtualDepthRatio;
-    }
-
-    /**
      * @notice 计算 AMM 分配
-     * 使用 (MaxW - W) * Y = K 原理计算
+     * 公式: (R - deltaW)(Y + deltaS) = K, 其中 deltaW + deltaS = P
+     * 解得: deltaS^2 + (R + Y - P)deltaS - PY = 0
      */
     function calculateAMM(
         address merchant,
@@ -138,28 +125,23 @@ contract Market is
         Merchant storage m = merchants[merchant];
         uint256 S = _getSurplus(merchant);
         uint256 D = m.deposit;
-        uint256 MaxW = (D * m.leverageFactor) / 100;
 
-        // P = 0.99 * amount (扣除固定权利税)
+        // Y = S + 0.9D 虚拟积分深度
+        uint256 Y = S + ((D * 9) / 10);
+        // R = K / Y 虚拟现金余额
+        uint256 R = m.K / Y;
+        // P = 0.99 * amount (1% 固定权利税后的分配池)
         uint256 P = (amount * 99) / 100;
-        // Y = S + virtualDepthRatio * D
-        uint256 Y = S + ((D * m.virtualDepthRatio) / 10000);
 
-        // 如果已提现 W 超过或等于当前最大额度 MaxW，则无法提取现金
-        if (m.W >= MaxW) {
-            return (0, P);
-        }
-
-        // 现金余额 R = MaxW - W
-        uint256 R = MaxW - m.W;
-        // 现场计算本次交易的临时 K = R * Y
-        uint256 K = R * Y;
-
-        // 解二次方程: (R - deltaW)(Y + deltaS) = K 且 deltaW + deltaS = P
+        // 二次方程系数 b = R + Y - P
         int256 b = int256(R) + int256(Y) - int256(P);
-        uint256 discriminant = uint256(b * b) + (4 * P * Y);
+        uint256 c = P * Y;
+
+        // discriminant = b^2 + 4PY
+        uint256 discriminant = uint256(b * b) + (4 * c);
         uint256 root = FixedPointMathLib.sqrt(discriminant);
 
+        // 根据求根公式求得 deltaS (积分增量/动态关税)
         if (b >= 0) {
             deltaS = (root - uint256(b)) / 2;
         } else {
@@ -172,6 +154,10 @@ contract Market is
 
     // --- 核心业务 ---
 
+    /**
+     * @notice 商家缴纳押金入驻或追加押金
+     * @param interactionTarget 交互地址，注册后不可更改。
+     */
     function registerMerchant(
         uint256 amount,
         address interactionTarget
@@ -180,28 +166,41 @@ contract Market is
         require(interactionTarget != address(0), "Invalid interactionTarget");
 
         Merchant storage m = merchants[msg.sender];
+        uint256 S = _getSurplus(msg.sender);
 
         if (m.isActive) {
             require(
                 m.interactionTarget == interactionTarget,
                 "Interaction target mismatch"
             );
-            _syncMerchantParams(msg.sender);
-            // 直接追加押金，W 保持不变 (自然实现了 W 在新 MaxW 下的延续)
+
+            // 重新计算 K 以保持已收现 W 的连续性
+            uint256 Y_old = S + ((m.deposit * 9) / 10);
+            uint256 currentW = (10 * m.deposit) - (m.K / Y_old);
+
             m.deposit += amount;
+
+            uint256 Y_new = S + ((m.deposit * 9) / 10);
+            m.K = (10 * m.deposit - currentW) * Y_new;
         } else {
             m.isActive = true;
             m.interactionTarget = interactionTarget;
             m.deposit = amount;
-            m.W = 0; // 新商家已提现为 0
-            m.leverageFactor = leverageFactor;
-            m.virtualDepthRatio = virtualDepthRatio;
+            // 初始 K = (10D - 0) * (S + 0.9D)
+            m.K = (10 * amount) * (S + ((amount * 9) / 10));
         }
 
         underlying.safeTransferFrom(msg.sender, address(this), amount);
-        emit MerchantRegistered(msg.sender, interactionTarget, m.deposit, m.W);
+        emit MerchantRegistered(msg.sender, interactionTarget, m.deposit, m.K);
     }
 
+    /**
+     * @notice 核心交易函数
+     * @param buyer 接受买方积分与权利代币的地址
+     * @param merchant 商家地址
+     * @param amount 交易总额
+     * @param data 业务指令数据
+     */
     function trade(
         address buyer,
         address merchant,
@@ -211,23 +210,23 @@ contract Market is
         Merchant storage m = merchants[merchant];
         require(m.isActive, "Merchant not active");
 
-        _syncMerchantParams(merchant);
-
+        // 1. 根据 AMM 公式计算现金分配与动态关税
         (uint256 deltaW, uint256 deltaS) = calculateAMM(merchant, amount);
 
+        // 2. 资金归集与 1% 固定权利税
         uint256 vaultFee = amount / 100;
         underlying.safeTransferFrom(msg.sender, address(this), amount);
         underlying.safeTransfer(vault, vaultFee);
 
-        // 更新商家已提现现金总额 W
-        m.W += deltaW;
-
+        // 3. 积分账本更新 (deltaS 为本次交易的关税额，也是顺差积分增量)
         buyerPoints[buyer] += deltaS;
         sellerPoints[merchant] += deltaS;
 
+        // 4. 权利代币铸造 (基于 1% 固定税)
         buyerRights.mint(buyer, vaultFee);
         sellerRights.mint(merchant, vaultFee);
 
+        // 5. 拨付现金至执行器并触发后续逻辑
         underlying.safeTransfer(executor, deltaW);
         ITradeExecutor(executor).executeTrade(
             m.interactionTarget,
@@ -238,13 +237,20 @@ contract Market is
         emit Traded(msg.sender, buyer, merchant, amount, deltaW, deltaS);
     }
 
+    /**
+     * @notice 积分对冲退税
+     * @dev 积分减少会降低 S，在 K 不变的情况下，自动增加商家的虚拟现金提取额度 R。
+     */
     function claimTaxRefund(address account) external nonReentrant {
         (uint256 actualClaim, uint256 newAvailableQuota) = claimable(account);
+
         lastAvailableQuota[account] = newAvailableQuota;
         lastClaimTime[account] = block.timestamp;
+
         buyerPoints[account] -= actualClaim;
         sellerPoints[account] -= actualClaim;
         claimed[account] += actualClaim;
+
         underlying.safeTransfer(account, actualClaim);
         emit TaxRefunded(account, actualClaim);
     }
@@ -254,13 +260,16 @@ contract Market is
     ) public view returns (uint256 actualClaim, uint256 newAvailableQuota) {
         uint256 bP = buyerPoints[account];
         uint256 sP = sellerPoints[account];
+
         uint256 totalRefundable = bP < sP ? bP : sP;
         require(totalRefundable > 0, "No refundable points");
         uint256 availableQuota = getAvailableQuota(account);
-        require(availableQuota > 0, "Quota exhausted");
+        require(availableQuota > 0, "Quota exhausted, wait for recovery");
+
         actualClaim = totalRefundable > availableQuota
             ? availableQuota
             : totalRefundable;
+
         newAvailableQuota = availableQuota - actualClaim;
         return (actualClaim, newAvailableQuota);
     }
@@ -268,47 +277,71 @@ contract Market is
     function getAvailableQuota(address account) public view returns (uint256) {
         uint256 deposit = merchants[account].deposit;
         if (deposit == 0) return 0;
+
         uint256 maxQuota = (deposit * quotaRatio) / 10000;
-        if (lastClaimTime[account] == 0) return maxQuota;
+
+        if (lastClaimTime[account] == 0) {
+            return maxQuota;
+        }
+
         uint256 timePassed = block.timestamp - lastClaimTime[account];
-        if (timePassed >= QUOTA_PERIOD) return maxQuota;
+
+        if (timePassed >= QUOTA_PERIOD) {
+            return maxQuota;
+        }
+
         uint256 recovered = (maxQuota * timePassed) / QUOTA_PERIOD;
         uint256 total = lastAvailableQuota[account] + recovered;
+
         return total > maxQuota ? maxQuota : total;
     }
 
+    // --- 权限管理与治理 ---
+
+    /**
+     * @notice 治理踢出（由治理模块直接调用）
+     * @dev 没收商家所有押金进入金库。
+     */
     function kickMerchant(address merchant) external nonReentrant {
         require(msg.sender == governance, "Only governance");
         Merchant storage m = merchants[merchant];
         require(m.isActive, "Merchant not active");
+
         uint256 slashedAmount = m.deposit;
-        if (buyerPoints[merchant] > 0) {
-            buyerPoints[vault] += buyerPoints[merchant];
+
+        // --- 修改点 3：精准没收该商家的积分 ---
+        uint256 bP = buyerPoints[merchant];
+        uint256 sP = sellerPoints[merchant];
+
+        if (bP > 0) {
             buyerPoints[merchant] = 0;
+            buyerPoints[vault] += bP; // 没收至金库
         }
-        if (sellerPoints[merchant] > 0) {
-            sellerPoints[vault] += sellerPoints[merchant];
+        if (sP > 0) {
             sellerPoints[merchant] = 0;
+            sellerPoints[vault] += sP; // 没收至金库
         }
-        delete merchants[merchant];
+
+        // 清理商家状态
+        m.isActive = false;
+        m.deposit = 0;
+        m.K = 0;
+
+        // 没收押金入库
         underlying.safeTransfer(vault, slashedAmount);
+
         emit MerchantKicked(merchant, slashedAmount);
     }
 
     function setVault(address _newVault) external onlyOwner {
         vault = _newVault;
     }
+
     function setExecutor(address _executor) external onlyOwner {
         executor = _executor;
     }
+
     function setQuotaParams(uint256 _newRatio) external onlyOwner {
         quotaRatio = _newRatio;
-    }
-    function setGlobalAMMParams(
-        uint256 _leverage,
-        uint256 _depthRatio
-    ) external onlyOwner {
-        leverageFactor = _leverage;
-        virtualDepthRatio = _depthRatio;
     }
 }

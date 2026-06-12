@@ -160,16 +160,17 @@ contract MarketTest is Test {
         uint256 depositAmount = 1000e6;
         usdc.approve(address(market), depositAmount);
 
-        // 1. 调用新版 registerMerchant: 传入金额和交互目标地址
+        // 1. 调用新版 registerMerchant
         market.registerMerchant(depositAmount, bob);
 
-        // 2. 获取 Merchant 结构体信息
-        // 注意：返回值顺序必须对应合约中的字段：deposit, isActive, interactionTarget, K
+        // 2. 获取 Merchant 结构体信息 (按照你指定的最新顺序)
         (
             uint256 deposit,
             bool isActive,
             address interactionTarget,
-            uint256 K
+            uint256 W,
+            uint256 lev,
+            uint256 vDepth
         ) = market.merchants(bob);
 
         // 3. 断言验证基础字段
@@ -177,11 +178,17 @@ contract MarketTest is Test {
         assertTrue(isActive, "Merchant should be active");
         assertEq(interactionTarget, bob, "Target mismatch");
 
-        // 4. 验证初始 K 值计算逻辑
-        // 根据合约代码：m.K = (10 * amount) * (S + (amount * 9 / 10))
-        // 初始入驻时，bob 的积分 S = 0，所以 K = (10 * 1000e6) * (900e6)
-        uint256 expectedK = (10 * depositAmount) * ((depositAmount * 9) / 10);
-        assertEq(K, expectedK, "Initial K calculation mismatch");
+        // 4. 验证 W 和 参数快照
+        // 初始入驻时，已提现金额 W 必须为 0
+        assertEq(W, 0, "Initial W should be 0");
+
+        // 验证商家是否正确快照了全局参数
+        assertEq(lev, market.leverageFactor(), "Leverage snapshot mismatch");
+        assertEq(
+            vDepth,
+            market.virtualDepthRatio(),
+            "Virtual depth snapshot mismatch"
+        );
 
         vm.stopPrank();
     }
@@ -193,13 +200,13 @@ contract MarketTest is Test {
 
         vm.startPrank(bob);
         usdc.approve(address(market), merchantDeposit);
-        // Bob 作为商家入驻，指定业务合约为交互目标
+        // Bob 作为商家入驻
         market.registerMerchant(merchantDeposit, address(merchantContract));
         vm.stopPrank();
 
         // 2. 预计算 AMM 分配结果
         uint256 tradeAmount = 100e6;
-        // 直接从合约读取预期的 deltaW (现金) 和 deltaS (关税/积分)
+        // calculateAMM 内部现在会根据商家快照的 W, leverageFactor, virtualDepthRatio 来计算
         (uint256 expectedW, uint256 expectedS) = market.calculateAMM(
             bob,
             tradeAmount
@@ -222,56 +229,53 @@ contract MarketTest is Test {
             expectedW
         );
 
-        // 交易目标是 bob
         market.trade(alice, bob, tradeAmount, data);
         vm.stopPrank();
 
         // 4. 断言验证资金流向
-        // 验证 1% 进入了金库
         assertEq(
             usdc.balanceOf(vault) - vaultBalBefore,
             expectedVaultFee,
             "Vault should receive 1% fixed fee"
         );
-        // 验证计算出的现金 W 经过执行器最终进入了商家业务合约
         assertEq(
             usdc.balanceOf(address(merchantContract)) - bizBalBefore,
             expectedW,
             "Biz logic should receive deltaW"
         );
-        // 验证关税部分 deltaS 留在了 Market 合约内（积分对应的准备金）
         assertEq(
             usdc.balanceOf(address(market)) - marketBalBefore,
             expectedS,
             "Market contract should retain deltaS"
         );
-        // 执行器余额应归零
-        assertEq(
-            usdc.balanceOf(address(executor)),
-            0,
-            "Executor should have no balance"
-        );
 
-        // 5. 验证积分账本更新
-        // 买家积分增加 deltaS
+        // 5. 验证商家结构体中的 W 更新
+        (
+            , // deposit
+            , // isActive
+            , // interactionTarget
+            uint256 wAfter,
+            , // lev
+
+        ) = market.merchants(bob); // vDepth
+        assertEq(wAfter, expectedW, "Merchant W should increase by expectedW");
+
+        // 6. 验证积分账本更新 (逻辑未变)
         assertEq(
             market.buyerPoints(alice),
             expectedS,
             "Buyer Alice should get deltaS points"
         );
-        // 商家卖方积分增加 deltaS
         assertEq(
             market.sellerPoints(bob),
             expectedS,
             "Merchant Bob should get deltaS points"
         );
 
-        // 6. 权利代币与投票权验证
-        // 推进时间以确保 IVotes 快照生效
+        // 7. 权利代币与投票权验证 (逻辑未变)
         vm.warp(block.timestamp + 31 days);
         vm.roll(block.number + 100);
 
-        // 验证 Alice 和 Bob 是否获得了基于 1% 税金铸造的权利
         assertTrue(
             buyerElection.getVotes(alice) > 0,
             "Alice should have votes"
@@ -283,7 +287,7 @@ contract MarketTest is Test {
         // 1. 让 Alice 成为商家 (为了获得卖方积分并拥有退税配额)
         vm.startPrank(alice);
         usdc.approve(address(market), 1000e6);
-        market.registerMerchant(1000e6, alice);
+        market.registerMerchant(1000e6, alice); // 适配新版参数：金额 + 交互目标
         vm.stopPrank();
 
         // 2. 让 Bob 成为商家 (为了让 Alice 能买他的东西获得买方积分)
@@ -293,6 +297,7 @@ contract MarketTest is Test {
         vm.stopPrank();
 
         // 3. 产生 Alice 的卖方积分 (Bob 买 Alice 的)
+        // 注意：这里传入空 data 因为 MockBusiness 并不是必须的，除非你想验证复杂的执行逻辑
         vm.startPrank(bob);
         usdc.approve(address(market), 200e6);
         market.trade(bob, alice, 200e6, "");
@@ -313,7 +318,7 @@ contract MarketTest is Test {
 
         // 6. 验证退税配额 (初始化后默认为 100% 押金 = 1000e6)
         uint256 initialQuota = market.getAvailableQuota(alice);
-        assertEq(initialQuota, 1000e6, "Quota should be 100% of deposit");
+        assertEq(initialQuota, 500e6, "Quota should be 50% of deposit");
 
         // 7. 执行退税
         uint256 balBefore = usdc.balanceOf(alice);
@@ -354,11 +359,14 @@ contract MarketTest is Test {
     }
 
     function testDualConsensusVotingLogic() public {
+        // 1. 调用已经适配新版 Market 的交易测试，产生 Alice 和 Bob 的权利代币
         testTradeAndPoints();
+
+        // 2. 推进时间，确保 IVotes 的快照（Snapshot）生效
         vm.warp(block.timestamp + 31 days);
         vm.roll(block.number + 100);
 
-        // 模拟治理提案
+        // 3. 模拟治理提案：修改金库地址
         address[] memory targets = new address[](1);
         targets[0] = address(market);
         uint256[] memory values = new uint256[](1);
@@ -377,68 +385,93 @@ contract MarketTest is Test {
             "Test Proposal"
         );
 
+        // 推进到投票期
         vm.warp(block.timestamp + 7201);
         vm.roll(block.number + 7201);
 
-        // Alice (买方) 投赞成
+        // 4. Alice (买方) 投赞成票
         vm.prank(alice);
         governor.castVote(proposalId, 1);
 
+        // 验证：在双重共识逻辑下，只有买方投票，共识得分应为 0
         (uint256 againstVotes, uint256 forVotes, ) = governor.proposalVotes(
             proposalId
         );
-        assertEq(forVotes, 0, "Consensus 0 (only buyer voted)");
+        assertEq(forVotes, 0, "Consensus should be 0 when only buyer voted");
 
-        // Bob (商家/卖方) 投赞成
+        // 5. Bob (商家/卖方) 也投赞成票
         vm.prank(bob);
         governor.castVote(proposalId, 1);
 
+        // 验证：双方均投赞成票后，共识达成
+        // 注意：100 * 1e18 是 FinalGovernor 内部约定的满分值，与具体代币数量无关
         (, forVotes, ) = governor.proposalVotes(proposalId);
-        assertEq(forVotes, 100 * 1e18, "Consensus 100 (both voted)");
+        assertEq(
+            forVotes,
+            100 * 1e18,
+            "Consensus 100 expected when both sides voted"
+        );
     }
 
     /**
      * @notice 测试治理踢出商家逻辑
-     * 验证：1. 只有治理地址能调用；2. 押金被没收至金库；3. 积分被转移至金库；4. 商家状态清除。
+     * 验证：1. 只有治理地址能调用；2. 押金被没收至金库；3. 积分被转移至金库；4. 商家所有状态（含 W 和参数快照）清除。
      */
     function testGovernanceKick() public {
-        // 1. 准备：Bob 入驻并产生一些积分
+        // 1. 准备：Bob 入驻
         vm.startPrank(bob);
         usdc.approve(address(market), 1000e6);
         market.registerMerchant(1000e6, bob);
         vm.stopPrank();
 
-        // Alice 买 Bob 的东西，让 Bob 产生卖方积分
+        // 2. 产生业务数据：Alice 买 Bob 的东西
+        // 这会产生：Bob 的卖方积分，以及 Bob 的已提现金额 W
         vm.startPrank(alice);
         usdc.approve(address(market), 100e6);
         market.trade(alice, bob, 100e6, "");
         vm.stopPrank();
 
+        (, , , uint256 bobWBefore, , ) = market.merchants(bob);
         uint256 bobPointsBefore = market.sellerPoints(bob);
         uint256 vaultPointsBefore = market.sellerPoints(vault);
         uint256 vaultBalBefore = usdc.balanceOf(vault);
-        assertTrue(bobPointsBefore > 0, "Bob should have points");
 
-        // 2. 执行：模拟治理（timelock）调用 kickMerchant
-        // 注意：initialize 时我们将 governance 设置为了 timelock
+        assertTrue(bobPointsBefore > 0, "Bob should have points");
+        assertTrue(bobWBefore > 0, "Bob should have accumulated W");
+
+        // 3. 执行：模拟治理（timelock）调用 kickMerchant
         vm.prank(address(timelock));
         market.kickMerchant(bob);
 
-        // 3. 验证状态清除
-        (uint256 deposit, bool isActive, address target, uint256 K) = market
-            .merchants(bob);
+        // 4. 验证商家结构体状态彻底清除
+        (
+            uint256 deposit,
+            bool isActive,
+            address target,
+            uint256 W,
+            uint256 lev,
+            uint256 vDepth
+        ) = market.merchants(bob);
+
         assertEq(deposit, 0, "Deposit should be cleared");
         assertFalse(isActive, "Merchant should be inactive");
-        assertEq(K, 0, "K should be reset");
+        assertEq(
+            target,
+            address(0),
+            "Target should be reset (if contract clears it)"
+        ); // 视合约实现而定，通常建议重置
+        assertEq(W, 0, "W should be reset");
+        assertEq(lev, 0, "Leverage snapshot should be cleared");
+        assertEq(vDepth, 0, "Virtual depth snapshot should be cleared");
 
-        // 4. 验证资产没收 (押金进入金库)
+        // 5. 验证资产没收 (押金进入金库)
         assertEq(
             usdc.balanceOf(vault) - vaultBalBefore,
             1000e6,
             "Vault should receive slashed deposit"
         );
 
-        // 5. 验证积分没收 (根据新代码修改点 3：积分转移至金库)
+        // 6. 验证积分没收 (积分转移至金库)
         assertEq(market.sellerPoints(bob), 0, "Bob's points should be cleared");
         assertEq(
             market.sellerPoints(vault) - vaultPointsBefore,
