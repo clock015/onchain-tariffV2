@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts-upgradeable/token/ERC20/IERC20Upgradeable.sol";
-import "@openzeppelin/contracts-upgradeable/token/ERC20/utils/SafeERC20Upgradeable.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import "./interfaces/IMarket.sol";
-import "./interfaces/IRightsToken.sol";
+import "../interfaces/IMarket.sol";
+import "../interfaces/IRightsToken.sol";
 
 /**
  * @title MerchantBase (UUPS with Namespaced Storage)
@@ -19,7 +19,7 @@ abstract contract MerchantBase is
     OwnableUpgradeable,
     UUPSUpgradeable
 {
-    using SafeERC20Upgradeable for IERC20Upgradeable;
+    using SafeERC20 for IERC20;
 
     /**
      * @dev 将所有状态变量定义在结构体中
@@ -27,7 +27,7 @@ abstract contract MerchantBase is
      */
     struct MerchantBaseStorage {
         address market;
-        IERC20Upgradeable underlying;
+        IERC20 underlying;
         address buyerElection;
         address sellerElection;
         address beneficiary;
@@ -74,11 +74,10 @@ abstract contract MerchantBase is
         address _initialBeneficiary
     ) internal onlyInitializing {
         __Ownable_init(msg.sender);
-        __UUPSUpgradeable_init();
 
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.market = _market;
-        $.underlying = IERC20Upgradeable(_underlying);
+        $.underlying = IERC20(_underlying);
         $.buyerElection = _buyerElection;
         $.sellerElection = _sellerElection;
         $.beneficiary = _initialBeneficiary;
@@ -100,7 +99,7 @@ abstract contract MerchantBase is
     function market() public view returns (address) {
         return _getMerchantBaseStorage().market;
     }
-    function underlying() public view returns (IERC20Upgradeable) {
+    function underlying() public view returns (IERC20) {
         return _getMerchantBaseStorage().underlying;
     }
     function beneficiary() public view returns (address) {
