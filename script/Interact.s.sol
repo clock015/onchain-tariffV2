@@ -32,19 +32,16 @@ contract Interactor is Script {
         _fundTestAccounts(DEFAULT_TEST_MINT);
     }
 
-    function registerAsMerchant(
-        uint256 amount,
-        address interactionTarget
-    ) external {
-        _registerAsMerchant(pk, amount, interactionTarget);
+    function registerAsMerchant(uint256 amount) external {
+        _registerAsMerchant(pk, amount);
     }
 
     function registerPk2AsMerchant() external {
-        _registerAsMerchant(pk2, DEFAULT_DEPOSIT, vm.addr(pk2));
+        _registerAsMerchant(pk2, DEFAULT_DEPOSIT);
     }
 
     function registerPk3AsMerchant() external {
-        _registerAsMerchant(pk3, DEFAULT_DEPOSIT, vm.addr(pk3));
+        _registerAsMerchant(pk3, DEFAULT_DEPOSIT);
     }
 
     function doTrade(
@@ -92,8 +89,8 @@ contract Interactor is Script {
         console.log("PK3:", pk3Address);
 
         _fundTestAccounts(DEFAULT_TEST_MINT);
-        _registerAsMerchant(pk2, DEFAULT_DEPOSIT, pk2Address);
-        _registerAsMerchant(pk3, DEFAULT_DEPOSIT, pk3Address);
+        _registerAsMerchant(pk2, DEFAULT_DEPOSIT);
+        _registerAsMerchant(pk3, DEFAULT_DEPOSIT);
         _doTrade(pk, pkAddress, pk2Address, DEFAULT_TRADE_AMOUNT, bytes(""));
         _doTrade(
             pk2,
@@ -130,20 +127,15 @@ contract Interactor is Script {
         console.log("Minted test USDC to PK3:", amount);
     }
 
-    function _registerAsMerchant(
-        uint256 signerPk,
-        uint256 amount,
-        address interactionTarget
-    ) internal {
+    function _registerAsMerchant(uint256 signerPk, uint256 amount) internal {
         address merchant = vm.addr(signerPk);
 
         vm.startBroadcast(signerPk);
         usdc.approve(address(market), amount);
-        market.registerMerchant(amount, interactionTarget);
+        market.registerMerchant(amount);
         vm.stopBroadcast();
 
         console.log("Merchant registered:", merchant);
-        console.log("Interaction target:", interactionTarget);
         console.log("Deposit:", amount);
     }
 

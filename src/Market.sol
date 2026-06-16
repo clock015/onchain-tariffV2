@@ -30,7 +30,6 @@ contract Market is
     struct Merchant {
         uint256 deposit; // D: 押金
         bool isActive;
-        address interactionTarget;
         uint256 W; // W: 已提现现金总额 (实际业务意义)
         uint256 leverageFactor; // 商家快照杠杆 (100基准)
         uint256 virtualDepthRatio; // 商家快照深度比例 (10000基准)
@@ -62,7 +61,6 @@ contract Market is
     // --- 事件 ---
     event MerchantRegistered(
         address indexed merchant,
-        address indexed interactionTarget,
         uint256 deposit,
         uint256 W
     );
@@ -153,7 +151,7 @@ contract Market is
         // 现金余额 R = MaxW - W
         uint256 R = MaxW - m.W;
         // 现场计算本次交易的临时 K = R * Y
-        uint256 K = R * Y;
+        // uint256 K = R * Y;
 
         // 解二次方程: (R - deltaW)(Y + deltaS) = K 且 deltaW + deltaS = P
         int256 b = int256(R) + int256(Y) - int256(P);
@@ -172,26 +170,17 @@ contract Market is
 
     // --- 核心业务 ---
 
-    function registerMerchant(
-        uint256 amount,
-        address interactionTarget
-    ) external {
+    function registerMerchant(uint256 amount) external {
         require(amount > 0, "Deposit required");
-        require(interactionTarget != address(0), "Invalid interactionTarget");
 
         Merchant storage m = merchants[msg.sender];
 
         if (m.isActive) {
-            require(
-                m.interactionTarget == interactionTarget,
-                "Interaction target mismatch"
-            );
             _syncMerchantParams(msg.sender);
             // 直接追加押金，W 保持不变 (自然实现了 W 在新 MaxW 下的延续)
             m.deposit += amount;
         } else {
             m.isActive = true;
-            m.interactionTarget = interactionTarget;
             m.deposit = amount;
             m.W = 0; // 新商家已提现为 0
             m.leverageFactor = leverageFactor;
@@ -199,7 +188,7 @@ contract Market is
         }
 
         underlying.safeTransferFrom(msg.sender, address(this), amount);
-        emit MerchantRegistered(msg.sender, interactionTarget, m.deposit, m.W);
+        emit MerchantRegistered(msg.sender, m.deposit, m.W);
     }
 
     function trade(
@@ -229,11 +218,7 @@ contract Market is
         sellerRights.mint(merchant, vaultFee);
 
         underlying.safeTransfer(executor, deltaW);
-        ITradeExecutor(executor).executeTrade(
-            m.interactionTarget,
-            deltaW,
-            data
-        );
+        ITradeExecutor(executor).executeTrade(merchant, deltaW, data);
 
         emit Traded(msg.sender, buyer, merchant, amount, deltaW, deltaS);
     }
