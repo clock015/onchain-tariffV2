@@ -49,8 +49,8 @@ contract Market is
     uint256 public quotaRatio;
 
     // --- 全局默认参数 ---
-    uint256 public leverageFactor; // 默认杠杆 (例如 1000 代表 10倍)
-    uint256 public virtualDepthRatio; // 默认比例 (例如 9000 代表 0.9)
+    uint256 public leverageFactor; // 默认最大利润押金比 (例如 1000 代表 10倍)
+    uint256 public virtualDepthRatio; // 默认最低关税基数 (例如 9000 代表 0.9)
 
     // --- 权限与检查 ---
     modifier notFromExecutor() {
@@ -94,7 +94,7 @@ contract Market is
         vault = _vault;
         QUOTA_PERIOD = 30 days;
         quotaRatio = 5000;
-        leverageFactor = 1000;
+        leverageFactor = 500;
         virtualDepthRatio = 9000;
     }
 
