@@ -55,6 +55,7 @@ interface IMarket {
     function trade(
         address buyer,
         address merchant,
+        uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
     ) external;

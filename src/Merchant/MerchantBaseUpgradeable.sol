@@ -8,23 +8,17 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import "../interfaces/IMarket.sol";
+import "../interfaces/IMerchantRechargeable.sol";
 import "../interfaces/IRightsToken.sol";
 
-/**
- * @title MerchantBase (UUPS with Namespaced Storage)
- * @notice 浣跨敤鍛藉悕绌洪棿瀛樺偍妯″紡锛岀‘淇濈户鎵垮畨鍏ㄦ€?
- */
 abstract contract MerchantBase is
     Initializable,
     OwnableUpgradeable,
-    UUPSUpgradeable
+    UUPSUpgradeable,
+    IMerchantRechargeable
 {
     using SafeERC20 for IERC20;
 
-    /**
-     * @dev 灏嗘墍鏈夌姸鎬佸彉閲忓畾涔夊湪缁撴瀯浣撲腑
-     * 鎸夌収 ERC-7201 鏍囧噯锛岃繖鍙互闃叉缁ф壙鏃剁殑瀛樺偍鍐茬獊
-     */
     struct MerchantBaseStorage {
         address market;
         IERC20 underlying;
@@ -32,16 +26,12 @@ abstract contract MerchantBase is
         address sellerElection;
         address beneficiary;
         address tradeExecutor;
+        address business;
     }
 
-    // 璁＄畻瀛樺偍妲戒綅缃? keccak256(abi.encode(uint256(keccak256("merchant.storage.MerchantBase")) - 1)) & ~bytes32(uint256(0xff))
-    // 杩欐槸涓轰簡閬靛惊 ERC-7201 閬垮厤纰版挒鐨勬帹鑽愯绠楁柟寮?
     bytes32 private constant MerchantBaseStorageLocation =
         0x56a421008746973f1d5e3f43501a37c9508c90333d0e376044791307b2298600;
 
-    /**
-     * @dev 鑾峰彇瀛樺偍缁撴瀯浣撶殑鎸囬拡
-     */
     function _getMerchantBaseStorage()
         private
         pure
@@ -52,7 +42,6 @@ abstract contract MerchantBase is
         }
     }
 
-    // --- 浜嬩欢 ---
     event BeneficiaryUpdated(
         address indexed oldBeneficiary,
         address indexed newBeneficiary
@@ -60,6 +49,10 @@ abstract contract MerchantBase is
     event TradeExecutorUpdated(
         address indexed oldTradeExecutor,
         address indexed newTradeExecutor
+    );
+    event BusinessUpdated(
+        address indexed oldBusiness,
+        address indexed newBusiness
     );
     event RefundForwarded(address indexed beneficiary, uint256 amount);
 
@@ -71,21 +64,26 @@ abstract contract MerchantBase is
         _;
     }
 
-    /// @custom:oz-upgrades-unsafe-allow constructor
+    modifier onlyOwnerOrBusiness() {
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        require(
+            msg.sender == owner() || msg.sender == $.business,
+            "Only owner or business"
+        );
+        _;
+    }
+
     constructor() {
         _disableInitializers();
     }
 
-    /**
-     * @notice 鍒濆鍖栧嚱鏁?
-     */
     function __MerchantBase_init(
         address _market,
         address _underlying,
         address _buyerElection,
         address _sellerElection,
         address _tradeExecutor,
-        address _initialBeneficiary
+        address _business
     ) internal onlyInitializing {
         __Ownable_init(msg.sender);
 
@@ -95,21 +93,13 @@ abstract contract MerchantBase is
         $.buyerElection = _buyerElection;
         $.sellerElection = _sellerElection;
         $.tradeExecutor = _tradeExecutor;
-        $.beneficiary = _initialBeneficiary;
+        $.business = _business;
+        $.beneficiary = msg.sender;
     }
-
-    // =============================================================
-    //                      鏉冮檺涓庡崌绾?
-    // =============================================================
 
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyOwner {}
-
-    // =============================================================
-    //                      鍙鏌ヨ (Getters)
-    // =============================================================
-    // 鐢变簬鍙橀噺鍦ㄧ粨鏋勪綋閲岋紝闇€瑕佹墜鍔ㄦ毚闇?Getter
 
     function market() public view returns (address) {
         return _getMerchantBaseStorage().market;
@@ -123,10 +113,9 @@ abstract contract MerchantBase is
     function tradeExecutor() public view returns (address) {
         return _getMerchantBaseStorage().tradeExecutor;
     }
-
-    // =============================================================
-    //                      鍟嗗绠＄悊鍔熻兘
-    // =============================================================
+    function business() public view returns (address) {
+        return _getMerchantBaseStorage().business;
+    }
 
     function setBeneficiary(address _newBeneficiary) external onlyOwner {
         require(_newBeneficiary != address(0), "Invalid address");
@@ -144,6 +133,13 @@ abstract contract MerchantBase is
         emit TradeExecutorUpdated(old, _newTradeExecutor);
     }
 
+    function setBusiness(address _newBusiness) external onlyOwner {
+        require(_newBusiness != address(0), "Invalid address");
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        address old = $.business;
+        $.business = _newBusiness;
+        emit BusinessUpdated(old, _newBusiness);
+    }
     function register(uint256 amount) external onlyOwner {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
@@ -154,14 +150,31 @@ abstract contract MerchantBase is
     function trade(
         address buyer,
         address merchant,
+        uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
-    ) external onlyOwner {
+    ) external onlyOwnerOrBusiness {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
         $.underlying.forceApprove($.market, amount);
-        IMarket($.market).trade(buyer, merchant, amount, data);
+        IMarket($.market).trade(buyer, merchant, rechargeTarget, amount, data);
     }
+
+    function rechargeFromTrade(
+        uint160 rechargeTarget,
+        uint256 amount,
+        uint256 deltaW,
+        bytes calldata data
+    ) external override onlyTradeExecutor {
+        _rechargeFromTrade(rechargeTarget, amount, deltaW, data);
+    }
+
+    function _rechargeFromTrade(
+        uint160 rechargeTarget,
+        uint256 amount,
+        uint256 deltaW,
+        bytes calldata data
+    ) internal virtual;
 
     function claimAndForward() external {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
