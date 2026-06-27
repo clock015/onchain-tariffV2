@@ -218,7 +218,7 @@ contract Market is
         sellerRights.mint(merchant, vaultFee);
 
         underlying.safeTransfer(executor, deltaW);
-        ITradeExecutor(executor).executeTrade(merchant, deltaW, data);
+        ITradeExecutor(executor).executeTrade(merchant, amount, deltaW, data);
 
         emit Traded(msg.sender, buyer, merchant, amount, deltaW, deltaS);
     }

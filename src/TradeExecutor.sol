@@ -24,6 +24,7 @@ contract TradeExecutor {
     function executeTrade(
         address target,
         uint256 amount,
+		uint256 deltaW,
         bytes calldata data
     ) external {
         require(msg.sender == market, "Only market can call");
@@ -32,7 +33,7 @@ contract TradeExecutor {
         if (data.length > 0) {
             // 核心逻辑：既然有 data，默认 target 会通过 transferFrom 拿钱
             // 直接授权给 target 足够的额度
-            underlying.forceApprove(target, amount);
+            underlying.forceApprove(target, deltaW);
 
             // 执行目标调用
             (bool success, ) = target.call(data);
@@ -42,7 +43,7 @@ contract TradeExecutor {
             underlying.forceApprove(target, 0);
         } else {
             // 没有指令，直接转账
-            underlying.safeTransfer(target, amount);
+            underlying.safeTransfer(target, deltaW);
         }
     }
 }

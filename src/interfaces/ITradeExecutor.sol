@@ -15,6 +15,7 @@ interface ITradeExecutor {
     function executeTrade(
         address target,
         uint256 amount,
+		uint256 deltaW,
         bytes calldata data
     ) external;
 }

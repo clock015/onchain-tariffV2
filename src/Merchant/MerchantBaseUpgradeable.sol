@@ -12,7 +12,7 @@ import "../interfaces/IRightsToken.sol";
 
 /**
  * @title MerchantBase (UUPS with Namespaced Storage)
- * @notice 使用命名空间存储模式，确保继承安全性
+ * @notice 浣跨敤鍛藉悕绌洪棿瀛樺偍妯″紡锛岀‘淇濈户鎵垮畨鍏ㄦ€?
  */
 abstract contract MerchantBase is
     Initializable,
@@ -22,8 +22,8 @@ abstract contract MerchantBase is
     using SafeERC20 for IERC20;
 
     /**
-     * @dev 将所有状态变量定义在结构体中
-     * 按照 ERC-7201 标准，这可以防止继承时的存储冲突
+     * @dev 灏嗘墍鏈夌姸鎬佸彉閲忓畾涔夊湪缁撴瀯浣撲腑
+     * 鎸夌収 ERC-7201 鏍囧噯锛岃繖鍙互闃叉缁ф壙鏃剁殑瀛樺偍鍐茬獊
      */
     struct MerchantBaseStorage {
         address market;
@@ -31,15 +31,16 @@ abstract contract MerchantBase is
         address buyerElection;
         address sellerElection;
         address beneficiary;
+        address tradeExecutor;
     }
 
-    // 计算存储槽位置: keccak256(abi.encode(uint256(keccak256("merchant.storage.MerchantBase")) - 1)) & ~bytes32(uint256(0xff))
-    // 这是为了遵循 ERC-7201 避免碰撞的推荐计算方式
+    // 璁＄畻瀛樺偍妲戒綅缃? keccak256(abi.encode(uint256(keccak256("merchant.storage.MerchantBase")) - 1)) & ~bytes32(uint256(0xff))
+    // 杩欐槸涓轰簡閬靛惊 ERC-7201 閬垮厤纰版挒鐨勬帹鑽愯绠楁柟寮?
     bytes32 private constant MerchantBaseStorageLocation =
         0x56a421008746973f1d5e3f43501a37c9508c90333d0e376044791307b2298600;
 
     /**
-     * @dev 获取存储结构体的指针
+     * @dev 鑾峰彇瀛樺偍缁撴瀯浣撶殑鎸囬拡
      */
     function _getMerchantBaseStorage()
         private
@@ -51,12 +52,24 @@ abstract contract MerchantBase is
         }
     }
 
-    // --- 事件 ---
+    // --- 浜嬩欢 ---
     event BeneficiaryUpdated(
         address indexed oldBeneficiary,
         address indexed newBeneficiary
     );
+    event TradeExecutorUpdated(
+        address indexed oldTradeExecutor,
+        address indexed newTradeExecutor
+    );
     event RefundForwarded(address indexed beneficiary, uint256 amount);
+
+    modifier onlyTradeExecutor() {
+        require(
+            msg.sender == _getMerchantBaseStorage().tradeExecutor,
+            "Only trade executor"
+        );
+        _;
+    }
 
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
@@ -64,13 +77,14 @@ abstract contract MerchantBase is
     }
 
     /**
-     * @notice 初始化函数
+     * @notice 鍒濆鍖栧嚱鏁?
      */
     function __MerchantBase_init(
         address _market,
         address _underlying,
         address _buyerElection,
         address _sellerElection,
+        address _tradeExecutor,
         address _initialBeneficiary
     ) internal onlyInitializing {
         __Ownable_init(msg.sender);
@@ -80,11 +94,12 @@ abstract contract MerchantBase is
         $.underlying = IERC20(_underlying);
         $.buyerElection = _buyerElection;
         $.sellerElection = _sellerElection;
+        $.tradeExecutor = _tradeExecutor;
         $.beneficiary = _initialBeneficiary;
     }
 
     // =============================================================
-    //                      权限与升级
+    //                      鏉冮檺涓庡崌绾?
     // =============================================================
 
     function _authorizeUpgrade(
@@ -92,9 +107,9 @@ abstract contract MerchantBase is
     ) internal override onlyOwner {}
 
     // =============================================================
-    //                      只读查询 (Getters)
+    //                      鍙鏌ヨ (Getters)
     // =============================================================
-    // 由于变量在结构体里，需要手动暴露 Getter
+    // 鐢变簬鍙橀噺鍦ㄧ粨鏋勪綋閲岋紝闇€瑕佹墜鍔ㄦ毚闇?Getter
 
     function market() public view returns (address) {
         return _getMerchantBaseStorage().market;
@@ -105,9 +120,12 @@ abstract contract MerchantBase is
     function beneficiary() public view returns (address) {
         return _getMerchantBaseStorage().beneficiary;
     }
+    function tradeExecutor() public view returns (address) {
+        return _getMerchantBaseStorage().tradeExecutor;
+    }
 
     // =============================================================
-    //                      商家管理功能
+    //                      鍟嗗绠＄悊鍔熻兘
     // =============================================================
 
     function setBeneficiary(address _newBeneficiary) external onlyOwner {
@@ -118,11 +136,31 @@ abstract contract MerchantBase is
         emit BeneficiaryUpdated(old, _newBeneficiary);
     }
 
+    function setTradeExecutor(address _newTradeExecutor) external onlyOwner {
+        require(_newTradeExecutor != address(0), "Invalid address");
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        address old = $.tradeExecutor;
+        $.tradeExecutor = _newTradeExecutor;
+        emit TradeExecutorUpdated(old, _newTradeExecutor);
+    }
+
     function register(uint256 amount) external onlyOwner {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
         $.underlying.forceApprove($.market, amount);
         IMarket($.market).registerMerchant(amount);
+    }
+
+    function trade(
+        address buyer,
+        address merchant,
+        uint256 amount,
+        bytes calldata data
+    ) external onlyOwner {
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        $.underlying.safeTransferFrom(msg.sender, address(this), amount);
+        $.underlying.forceApprove($.market, amount);
+        IMarket($.market).trade(buyer, merchant, amount, data);
     }
 
     function claimAndForward() external {
