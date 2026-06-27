@@ -18,11 +18,13 @@ contract TradeExecutor {
     /**
      * @notice 执行贸易逻辑转发
      * @param target 目标商家（可以是另一个 Market 或业务合约）
+     * @param rechargeTarget 充值目标
      * @param amount 转发的金额 (90% 部分)
      * @param data 业务指令
      */
     function executeTrade(
         address target,
+		uint160 rechargeTarget,
         uint256 amount,
 		uint256 deltaW,
         bytes calldata data

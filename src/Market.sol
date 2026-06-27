@@ -194,6 +194,7 @@ contract Market is
     function trade(
         address buyer,
         address merchant,
+		uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
     ) external nonReentrant notFromExecutor {
@@ -218,7 +219,7 @@ contract Market is
         sellerRights.mint(merchant, vaultFee);
 
         underlying.safeTransfer(executor, deltaW);
-        ITradeExecutor(executor).executeTrade(merchant, amount, deltaW, data);
+        ITradeExecutor(executor).executeTrade(merchant, rechargeTarget, amount, deltaW, data);
 
         emit Traded(msg.sender, buyer, merchant, amount, deltaW, deltaS);
     }
