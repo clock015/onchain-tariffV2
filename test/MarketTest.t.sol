@@ -7,6 +7,7 @@ import "forge-std/console.sol";
 // 导入你的合约
 import "../src/Market.sol";
 import "../src/TradeExecutor.sol";
+import "../src/interfaces/IMerchantRechargeable.sol";
 import "../src/RightsToken/ProportionalElection.sol";
 import "../src/RightsToken/SeatTokenFactory.sol";
 import "../src/Governor/FinalGovernor.sol";
@@ -17,9 +18,22 @@ import "@openzeppelin/contracts/governance/TimelockController.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 // --- Mock 业务合约 ---
-contract MockBusiness {
-    function myBusinessLogic(address token, uint256 amount) external {
-        IERC20(token).transferFrom(msg.sender, address(this), amount);
+contract MockBusiness is IMerchantRechargeable {
+    uint160 public lastRechargeTarget;
+    uint256 public lastAmount;
+    uint256 public lastDeltaW;
+    bytes32 public lastDataHash;
+
+    function rechargeFromTrade(
+        uint160 rechargeTarget,
+        uint256 amount,
+        uint256 deltaW,
+        bytes calldata data
+    ) external override {
+        lastRechargeTarget = rechargeTarget;
+        lastAmount = amount;
+        lastDeltaW = deltaW;
+        lastDataHash = keccak256(data);
     }
 }
 
@@ -234,15 +248,16 @@ contract MarketTest is Test {
         vm.startPrank(alice);
         usdc.approve(address(market), tradeAmount);
 
-        // 构造 data：让 TradeExecutor 调用 merchantContract 的业务逻辑
-        // 传入 expectedW，因为 MockBusiness 会尝试划扣这笔钱
-        bytes memory data = abi.encodeWithSignature(
-            "myBusinessLogic(address,uint256)",
-            address(usdc),
-            expectedW
-        );
+        uint160 rechargeTarget = uint160(alice);
+        bytes memory data = abi.encode("test recharge payload");
 
-        market.trade(alice, address(merchantContract), tradeAmount, data);
+        market.trade(
+            alice,
+            address(merchantContract),
+            rechargeTarget,
+            tradeAmount,
+            data
+        );
         vm.stopPrank();
 
         // 5. 断言验证资金流向
@@ -268,9 +283,29 @@ contract MarketTest is Test {
             "Market tax pool should gain exactly deltaS"
         );
 
-        // 6. 验证商家状态更新
+        // 6. 验证商家状态更新和充值回调参数
         (, , uint256 wAfter, , ) = market.merchants(address(merchantContract));
         assertEq(wAfter, expectedW, "Merchant W should be updated by deltaW");
+        assertEq(
+            merchantContract.lastRechargeTarget(),
+            rechargeTarget,
+            "Recharge target mismatch"
+        );
+        assertEq(
+            merchantContract.lastAmount(),
+            tradeAmount,
+            "Recharge amount mismatch"
+        );
+        assertEq(
+            merchantContract.lastDeltaW(),
+            expectedW,
+            "Recharge deltaW mismatch"
+        );
+        assertEq(
+            merchantContract.lastDataHash(),
+            keccak256(data),
+            "Recharge data mismatch"
+        );
 
         // 7. 验证积分账本 (积分现在等于 deltaS)
         assertEq(
@@ -313,13 +348,13 @@ contract MarketTest is Test {
         // A. Alice 买 Bob 的 (产生 Alice 的买方积分)
         vm.startPrank(alice);
         usdc.approve(address(market), 200e6);
-        market.trade(alice, bob, 200e6, "");
+        market.trade(alice, bob, uint160(alice), 200e6, "");
         vm.stopPrank();
 
         // B. Bob 买 Alice 的 (产生 Alice 的卖方积分)
         vm.startPrank(bob);
         usdc.approve(address(market), 200e6);
-        market.trade(bob, alice, 200e6, "");
+        market.trade(bob, alice, uint160(bob), 200e6, "");
         vm.stopPrank();
 
         // 3. 准备退税断言数据
@@ -457,7 +492,7 @@ contract MarketTest is Test {
         // 从而产生 Bob 的卖方积分和已提现金额 W
         vm.startPrank(alice);
         usdc.approve(address(market), 100e6);
-        market.trade(alice, bob, 100e6, "");
+        market.trade(alice, bob, uint160(alice), 100e6, "");
         vm.stopPrank();
 
         // 记录没收前状态
