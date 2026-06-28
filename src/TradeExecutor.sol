@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "./interfaces/IMerchantRechargeable.sol";
+import "./interfaces/IMerchantTradeIn.sol";
 
 contract TradeExecutor {
     using SafeERC20 for IERC20;
@@ -19,7 +19,7 @@ contract TradeExecutor {
     function executeTrade(
         address target,
         uint160 rechargeTarget,
-        uint256 amount,
+        uint256 netAmount,
         uint256 deltaW,
         bytes calldata data
     ) external {
@@ -29,9 +29,9 @@ contract TradeExecutor {
         underlying.safeTransfer(target, deltaW);
 
         if (target.code.length > 0) {
-            IMerchantRechargeable(target).rechargeFromTrade(
+            IMerchantTradeIn(target).tradeIn(
                 rechargeTarget,
-                amount,
+                netAmount,
                 deltaW,
                 data
             );

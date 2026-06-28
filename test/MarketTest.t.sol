@@ -7,7 +7,7 @@ import "forge-std/console.sol";
 // 导入你的合约
 import "../src/Market.sol";
 import "../src/TradeExecutor.sol";
-import "../src/interfaces/IMerchantRechargeable.sol";
+import "../src/interfaces/IMerchantTradeIn.sol";
 import "../src/RightsToken/ProportionalElection.sol";
 import "../src/RightsToken/SeatTokenFactory.sol";
 import "../src/Governor/FinalGovernor.sol";
@@ -18,20 +18,20 @@ import "@openzeppelin/contracts/governance/TimelockController.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 // --- Mock 业务合约 ---
-contract MockBusiness is IMerchantRechargeable {
+contract MockBusiness is IMerchantTradeIn {
     uint160 public lastRechargeTarget;
     uint256 public lastAmount;
     uint256 public lastDeltaW;
     bytes32 public lastDataHash;
 
-    function rechargeFromTrade(
+    function tradeIn(
         uint160 rechargeTarget,
-        uint256 amount,
+        uint256 netAmount,
         uint256 deltaW,
         bytes calldata data
     ) external override {
         lastRechargeTarget = rechargeTarget;
-        lastAmount = amount;
+        lastAmount = netAmount;
         lastDeltaW = deltaW;
         lastDataHash = keccak256(data);
     }
@@ -249,6 +249,7 @@ contract MarketTest is Test {
         usdc.approve(address(market), tradeAmount);
 
         uint160 rechargeTarget = uint160(alice);
+        uint256 expectedNetAmount = tradeAmount - (tradeAmount / 100);
         bytes memory data = abi.encode("test recharge payload");
 
         market.trade(
@@ -293,8 +294,8 @@ contract MarketTest is Test {
         );
         assertEq(
             merchantContract.lastAmount(),
-            tradeAmount,
-            "Recharge amount mismatch"
+            expectedNetAmount,
+            "Recharge net amount mismatch"
         );
         assertEq(
             merchantContract.lastDeltaW(),

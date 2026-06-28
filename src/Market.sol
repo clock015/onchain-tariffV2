@@ -138,8 +138,8 @@ contract Market is
         uint256 D = m.deposit;
         uint256 MaxW = (D * m.leverageFactor) / 100;
 
-        // P = 0.99 * amount (扣除固定权利税)
-        uint256 P = (amount * 99) / 100;
+        // P = amount after the fixed 1% rights-token fee.
+        uint256 P = amount - (amount / 100);
         // Y = S + virtualDepthRatio * D
         uint256 Y = S + ((D * m.virtualDepthRatio) / 10000);
 
@@ -194,7 +194,7 @@ contract Market is
     function trade(
         address buyer,
         address merchant,
-		uint160 rechargeTarget,
+        uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
     ) external nonReentrant notFromExecutor {
@@ -206,6 +206,7 @@ contract Market is
         (uint256 deltaW, uint256 deltaS) = calculateAMM(merchant, amount);
 
         uint256 vaultFee = amount / 100;
+        uint256 netAmount = amount - vaultFee;
         underlying.safeTransferFrom(msg.sender, address(this), amount);
         underlying.safeTransfer(vault, vaultFee);
 
@@ -219,7 +220,13 @@ contract Market is
         sellerRights.mint(merchant, vaultFee);
 
         underlying.safeTransfer(executor, deltaW);
-        ITradeExecutor(executor).executeTrade(merchant, rechargeTarget, amount, deltaW, data);
+        ITradeExecutor(executor).executeTrade(
+            merchant,
+            rechargeTarget,
+            netAmount,
+            deltaW,
+            data
+        );
 
         emit Traded(msg.sender, buyer, merchant, amount, deltaW, deltaS);
     }

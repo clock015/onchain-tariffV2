@@ -117,7 +117,9 @@ abstract contract MerchantBase is
         return _getMerchantBaseStorage().business;
     }
 
-    function setBeneficiary(address _newBeneficiary) external onlyOwner {
+    function setBeneficiary(
+        address _newBeneficiary
+    ) external virtual onlyOwner {
         require(_newBeneficiary != address(0), "Invalid address");
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         address old = $.beneficiary;
@@ -125,7 +127,9 @@ abstract contract MerchantBase is
         emit BeneficiaryUpdated(old, _newBeneficiary);
     }
 
-    function setTradeExecutor(address _newTradeExecutor) external onlyOwner {
+    function setTradeExecutor(
+        address _newTradeExecutor
+    ) external virtual onlyOwner {
         require(_newTradeExecutor != address(0), "Invalid address");
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         address old = $.tradeExecutor;
@@ -133,14 +137,15 @@ abstract contract MerchantBase is
         emit TradeExecutorUpdated(old, _newTradeExecutor);
     }
 
-    function setBusiness(address _newBusiness) external onlyOwner {
+    function setBusiness(address _newBusiness) external virtual onlyOwner {
         require(_newBusiness != address(0), "Invalid address");
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         address old = $.business;
         $.business = _newBusiness;
         emit BusinessUpdated(old, _newBusiness);
     }
-    function register(uint256 amount) external onlyOwner {
+
+    function register(uint256 amount) external virtual onlyOwner {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
         $.underlying.forceApprove($.market, amount);
@@ -153,7 +158,7 @@ abstract contract MerchantBase is
         uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
-    ) external onlyOwnerOrBusiness {
+    ) external virtual onlyOwnerOrBusiness {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
         $.underlying.forceApprove($.market, amount);
@@ -162,21 +167,21 @@ abstract contract MerchantBase is
 
     function tradeIn(
         uint160 rechargeTarget,
-        uint256 amount,
+        uint256 netAmount,
         uint256 deltaW,
         bytes calldata data
-    ) external override onlyTradeExecutor {
-        _tradeIn(rechargeTarget, amount, deltaW, data);
+    ) external virtual override onlyTradeExecutor {
+        _tradeIn(rechargeTarget, netAmount, deltaW, data);
     }
 
     function _tradeIn(
         uint160 rechargeTarget,
-        uint256 amount,
+        uint256 netAmount,
         uint256 deltaW,
         bytes calldata data
     ) internal virtual;
 
-    function claimAndForward() external {
+    function claimAndForward() external virtual {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         uint256 balBefore = $.underlying.balanceOf(address(this));
 
@@ -191,7 +196,7 @@ abstract contract MerchantBase is
         }
     }
 
-    function delegateVotesToBeneficiary() external onlyOwner {
+    function delegateVotesToBeneficiary() external virtual onlyOwner {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         IRightsToken($.buyerElection).delegate($.beneficiary);
         IRightsToken($.sellerElection).delegate($.beneficiary);

@@ -64,7 +64,7 @@ interface IMarket {
      * 3. AMM 计算 deltaW 和 deltaS。
      * 4. deltaW 经 TradeExecutor 发给 merchant。
      * 5. 为 buyer 和 merchant 增加 deltaS 积分。
-     * 6. 若 merchant 是合约，TradeExecutor 会回调 rechargeFromTrade。
+     * 6. 若 merchant 是合约，TradeExecutor 会回调 tradeIn。
      */
     function trade(
         address buyer,
