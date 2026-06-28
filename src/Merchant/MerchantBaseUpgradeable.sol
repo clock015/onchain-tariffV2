@@ -8,14 +8,14 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import "../interfaces/IMarket.sol";
-import "../interfaces/IMerchantRechargeable.sol";
+import "../interfaces/IMerchantTradeIn.sol";
 import "../interfaces/IRightsToken.sol";
 
 abstract contract MerchantBase is
     Initializable,
     OwnableUpgradeable,
     UUPSUpgradeable,
-    IMerchantRechargeable
+    IMerchantTradeIn
 {
     using SafeERC20 for IERC20;
 
@@ -147,7 +147,7 @@ abstract contract MerchantBase is
         IMarket($.market).registerMerchant(amount);
     }
 
-    function trade(
+    function tradeOut(
         address buyer,
         address merchant,
         uint160 rechargeTarget,
@@ -160,16 +160,16 @@ abstract contract MerchantBase is
         IMarket($.market).trade(buyer, merchant, rechargeTarget, amount, data);
     }
 
-    function rechargeFromTrade(
+    function tradeIn(
         uint160 rechargeTarget,
         uint256 amount,
         uint256 deltaW,
         bytes calldata data
     ) external override onlyTradeExecutor {
-        _rechargeFromTrade(rechargeTarget, amount, deltaW, data);
+        _tradeIn(rechargeTarget, amount, deltaW, data);
     }
 
-    function _rechargeFromTrade(
+    function _tradeIn(
         uint160 rechargeTarget,
         uint256 amount,
         uint256 deltaW,
