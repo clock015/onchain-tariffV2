@@ -158,7 +158,7 @@ abstract contract MerchantBase is
         uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
-    ) external virtual onlyOwnerOrBusiness {
+    ) public virtual onlyOwnerOrBusiness {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
         $.underlying.forceApprove($.market, amount);
