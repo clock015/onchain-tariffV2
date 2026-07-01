@@ -7,9 +7,9 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import "../interfaces/IMarket.sol";
-import "../interfaces/IMerchantTradeIn.sol";
-import "../interfaces/IRightsToken.sol";
+import "../interfaces/onMarket/IMarket.sol";
+import "../interfaces/onMarket/IMerchantTradeIn.sol";
+import "../interfaces/onMarket/IRightsToken.sol";
 
 abstract contract MerchantBase is
     Initializable,
@@ -27,6 +27,7 @@ abstract contract MerchantBase is
         address beneficiary;
         address tradeExecutor;
         address business;
+        uint256 ownerBalance;
     }
 
     bytes32 private constant MerchantBaseStorageLocation =
@@ -54,12 +55,22 @@ abstract contract MerchantBase is
         address indexed oldBusiness,
         address indexed newBusiness
     );
+    event OwnerBalanceCredited(uint256 amount, uint256 newBalance);
+    event OwnerBalanceSpent(uint256 amount, uint256 newBalance);
     event RefundForwarded(address indexed beneficiary, uint256 amount);
 
     modifier onlyTradeExecutor() {
         require(
             msg.sender == _getMerchantBaseStorage().tradeExecutor,
             "Only trade executor"
+        );
+        _;
+    }
+
+    modifier onlyBusiness() {
+        require(
+            msg.sender == _getMerchantBaseStorage().business,
+            "Only business"
         );
         _;
     }
@@ -116,6 +127,9 @@ abstract contract MerchantBase is
     function business() public view returns (address) {
         return _getMerchantBaseStorage().business;
     }
+    function ownerBalance() public view returns (uint256) {
+        return _getMerchantBaseStorage().ownerBalance;
+    }
 
     function setBeneficiary(
         address _newBeneficiary
@@ -145,9 +159,20 @@ abstract contract MerchantBase is
         emit BusinessUpdated(old, _newBusiness);
     }
 
-    function register(uint256 amount) external virtual onlyOwner {
+    function creditOwnerBalance(uint256 amount) external virtual onlyBusiness {
+        _creditOwnerBalance(amount);
+    }
+
+    function depositOwnerBalance(uint256 amount) external virtual onlyOwner {
+        require(amount > 0, "Amount is zero");
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.underlying.safeTransferFrom(msg.sender, address(this), amount);
+        _creditOwnerBalance(amount);
+    }
+
+    function register(uint256 amount) external virtual onlyOwner {
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        _spendOwnerBalance(amount);
         $.underlying.forceApprove($.market, amount);
         IMarket($.market).registerMerchant(amount);
     }
@@ -160,7 +185,10 @@ abstract contract MerchantBase is
         bytes calldata data
     ) public virtual onlyOwnerOrBusiness {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
-        $.underlying.safeTransferFrom(msg.sender, address(this), amount);
+        if (msg.sender == owner()) {
+            _spendOwnerBalance(amount);
+        }
+
         $.underlying.forceApprove($.market, amount);
         IMarket($.market).trade(buyer, merchant, rechargeTarget, amount, data);
     }
@@ -200,5 +228,18 @@ abstract contract MerchantBase is
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         IRightsToken($.buyerElection).delegate($.beneficiary);
         IRightsToken($.sellerElection).delegate($.beneficiary);
+    }
+
+    function _creditOwnerBalance(uint256 amount) internal {
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        $.ownerBalance += amount;
+        emit OwnerBalanceCredited(amount, $.ownerBalance);
+    }
+
+    function _spendOwnerBalance(uint256 amount) internal {
+        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
+        require($.ownerBalance >= amount, "Insufficient owner balance");
+        $.ownerBalance -= amount;
+        emit OwnerBalanceSpent(amount, $.ownerBalance);
     }
 }
