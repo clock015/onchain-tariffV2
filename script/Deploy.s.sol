@@ -123,6 +123,7 @@ contract DeploySystem is Script {
         vm.stopBroadcast();
 
         console.log("Deployment Successful. Market:", address(market));
+        console.log("Trade Executor:", address(executor));
         console.log("Underlying Token:", address(underlyingToken));
         console.log("Buyer Election:", address(buyerElection));
         console.log("Seller Election:", address(sellerElection));

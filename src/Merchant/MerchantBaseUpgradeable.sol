@@ -7,9 +7,9 @@ import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
-import "../interfaces/onMarket/IMarket.sol";
-import "../interfaces/onMarket/IMerchantTradeIn.sol";
-import "../interfaces/onMarket/IRightsToken.sol";
+import "../interfaces/IMarket.sol";
+import "../interfaces/IMerchantTradeIn.sol";
+import "../interfaces/IRightsToken.sol";
 
 abstract contract MerchantBase is
     Initializable,
