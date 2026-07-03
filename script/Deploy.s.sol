@@ -7,6 +7,7 @@ import "../src/Market.sol";
 import "../src/TradeExecutor.sol";
 import "../src/RightsToken/ProportionalElection.sol";
 import "../src/RightsToken/SeatTokenFactory.sol";
+import "../src/RightsToken/GenesisSeatToken.sol";
 import "../src/Governor/FinalGovernor.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import "@openzeppelin/contracts/governance/TimelockController.sol";
@@ -24,6 +25,18 @@ contract DeploySystem is Script {
         SeatTokenFactory buyerFactory = new SeatTokenFactory();
         SeatTokenFactory sellerFactory = new SeatTokenFactory();
 
+        GenesisSeatToken buyerGenesisSeat = new GenesisSeatToken(
+            "Council Seat 0",
+            "CS",
+            admin
+        );
+        GenesisSeatToken sellerGenesisSeat = new GenesisSeatToken(
+            "Council Seat 0",
+            "CS",
+            admin
+        );
+        buyerGenesisSeat.mint(admin, 100 * 1e18);
+        sellerGenesisSeat.mint(admin, 100 * 1e18);
         // --- 2. 部署选举合约 (使用作用域 {} 减少栈压力) ---
         ProportionalElection buyerElection;
         ProportionalElection sellerElection;
@@ -35,7 +48,8 @@ contract DeploySystem is Script {
                         abi.encodeWithSelector(
                             ProportionalElection.initialize.selector,
                             address(buyerFactory),
-                            admin
+                            admin,
+                            address(buyerGenesisSeat)
                         )
                     )
                 )
@@ -48,12 +62,16 @@ contract DeploySystem is Script {
                         abi.encodeWithSelector(
                             ProportionalElection.initialize.selector,
                             address(sellerFactory),
-                            admin
+                            admin,
+                            address(sellerGenesisSeat)
                         )
                     )
                 )
             );
         }
+
+        buyerGenesisSeat.setMinter(address(buyerElection));
+        sellerGenesisSeat.setMinter(address(sellerElection));
 
         // 绑定工厂
         buyerFactory.setElectionContract(address(buyerElection));

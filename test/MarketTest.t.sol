@@ -10,6 +10,7 @@ import "../src/TradeExecutor.sol";
 import "../src/interfaces/IMerchantTradeIn.sol";
 import "../src/RightsToken/ProportionalElection.sol";
 import "../src/RightsToken/SeatTokenFactory.sol";
+import "../src/RightsToken/GenesisSeatToken.sol";
 import "../src/Governor/FinalGovernor.sol";
 
 // 导入依赖
@@ -68,6 +69,7 @@ contract MarketTest is Test {
     uint256 public constant INITIAL_BALANCE = 10000e6;
 
     function setUp() public {
+        vm.warp(365 days + 30 days);
         vm.startPrank(admin);
 
         // 1. 部署基础资产
@@ -78,13 +80,26 @@ contract MarketTest is Test {
         buyerFactory = new SeatTokenFactory();
         sellerFactory = new SeatTokenFactory();
 
+        GenesisSeatToken buyerGenesisSeat = new GenesisSeatToken(
+            "Council Seat 0",
+            "CS",
+            admin
+        );
+        GenesisSeatToken sellerGenesisSeat = new GenesisSeatToken(
+            "Council Seat 0",
+            "CS",
+            admin
+        );
+        buyerGenesisSeat.mint(admin, 100 * 1e18);
+        sellerGenesisSeat.mint(admin, 100 * 1e18);
         // 3. 部署 ProportionalElection (使用代理模式)
         // --- 买方选举合约 ---
         ProportionalElection buyerElectionImpl = new ProportionalElection();
         bytes memory buyerElectionInit = abi.encodeWithSelector(
             ProportionalElection.initialize.selector,
             address(buyerFactory),
-            admin
+            admin,
+            address(buyerGenesisSeat)
         );
         buyerElection = ProportionalElection(
             address(
@@ -97,7 +112,8 @@ contract MarketTest is Test {
         bytes memory sellerElectionInit = abi.encodeWithSelector(
             ProportionalElection.initialize.selector,
             address(sellerFactory),
-            admin
+            admin,
+            address(sellerGenesisSeat)
         );
         sellerElection = ProportionalElection(
             address(
@@ -108,6 +124,13 @@ contract MarketTest is Test {
             )
         );
 
+        buyerGenesisSeat.setMinter(address(buyerElection));
+        sellerGenesisSeat.setMinter(address(sellerElection));
+
+        assertEq(buyerElection.currentRoundId(), 1, "Buyer election should start at round 1");
+        assertEq(sellerElection.currentRoundId(), 1, "Seller election should start at round 1");
+        assertEq(buyerElection.getVotes(admin), 100 * 1e18, "Genesis buyer votes mismatch");
+        assertEq(sellerElection.getVotes(admin), 100 * 1e18, "Genesis seller votes mismatch");
         // 4. 绑定工厂与选举合约代理地址
         buyerFactory.setElectionContract(address(buyerElection));
         sellerFactory.setElectionContract(address(sellerElection));

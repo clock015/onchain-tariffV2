@@ -94,7 +94,7 @@ contract Market is
         vault = _vault;
         QUOTA_PERIOD = 30 days;
         quotaRatio = 5000;
-        leverageFactor = 500;
+        leverageFactor = 800;
         virtualDepthRatio = 9000;
     }
 

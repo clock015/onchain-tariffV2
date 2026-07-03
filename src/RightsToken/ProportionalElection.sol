@@ -72,16 +72,20 @@ contract ProportionalElection is
      */
     function initialize(
         address _factory,
-        address _initialMinter
+        address _initialMinter,
+        address _genesisSeatToken
     ) public initializer {
         // 3. 调用各基类的初始化
         __Ownable_init(msg.sender);
         __EIP712_init("ProportionalElection", "1");
         __Nonces_init();
 
+        require(_genesisSeatToken != address(0), "Invalid genesis seat token");
         seatFactory = ISeatTokenFactory(_factory);
         minter = _initialMinter;
-        genesisTime = block.timestamp;
+        genesisTime = block.timestamp - CYCLE_DURATION - BUFFER_DURATION;
+        rounds[0] = Round({seatToken: _genesisSeatToken, initialized: true});
+        emit RoundInitialized(0, _genesisSeatToken);
     }
 
     // 4. 必须实现此函数以支持 UUPS 升级授权
