@@ -2,18 +2,20 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "./interfaces/IMerchantTradeIn.sol";
+import "./interfaces/ISettlementAsset.sol";
 
 contract TradeExecutor {
-    using SafeERC20 for IERC20;
-
     address public immutable market;
-    IERC20 public immutable underlying;
+    ISettlementAsset public immutable settlementAsset;
 
-    constructor(address _market, address _underlying) {
+    constructor(address _market, address _settlementAsset) {
         market = _market;
-        underlying = IERC20(_underlying);
+        settlementAsset = ISettlementAsset(_settlementAsset);
+    }
+
+    function underlying() external view returns (IERC20) {
+        return IERC20(settlementAsset.asset());
     }
 
     function executeTrade(
@@ -26,7 +28,7 @@ contract TradeExecutor {
         require(msg.sender == market, "Only market can call");
         require(target != market, "Cannot call back to own market");
 
-        underlying.safeTransfer(target, deltaW);
+        settlementAsset.push(target, deltaW);
 
         if (target.code.length > 0) {
             IMerchantTradeIn(target).tradeIn(

@@ -7,3 +7,4 @@ optimizer_runs = 200     # 如果还是大，可以试着调成 1
 via_ir = true            # 必须开启，IR 模式对减少冗余代码非常有帮助
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
+fs_permissions = [{ access = "read-write", path = ".env" }]

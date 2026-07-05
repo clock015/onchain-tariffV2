@@ -7,6 +7,7 @@ import "forge-std/console.sol";
 // 导入你的合约
 import "../src/Market.sol";
 import "../src/TradeExecutor.sol";
+import "../src/settlement/ERC20SettlementAsset.sol";
 import "../src/interfaces/IMerchantTradeIn.sol";
 import "../src/RightsToken/ProportionalElection.sol";
 import "../src/RightsToken/SeatTokenFactory.sol";
@@ -49,6 +50,7 @@ contract MarketTest is Test {
     Market public market;
     TradeExecutor public executor;
     MockUSDC public usdc;
+    ERC20SettlementAsset public settlementAsset;
 
     SeatTokenFactory public buyerFactory;
     SeatTokenFactory public sellerFactory;
@@ -74,6 +76,17 @@ contract MarketTest is Test {
 
         // 1. 部署基础资产
         usdc = new MockUSDC();
+        ERC20SettlementAsset settlementImpl = new ERC20SettlementAsset();
+        bytes memory settlementInitData = abi.encodeWithSelector(
+            ERC20SettlementAsset.initialize.selector,
+            address(usdc),
+            admin
+        );
+        settlementAsset = ERC20SettlementAsset(
+            address(
+                new ERC1967Proxy(address(settlementImpl), settlementInitData)
+            )
+        );
         merchantContract = new MockBusiness();
 
         // 2. 部署治理代币工厂
@@ -147,7 +160,7 @@ contract MarketTest is Test {
         Market marketImpl = new Market();
         bytes memory marketInitData = abi.encodeWithSelector(
             Market.initialize.selector,
-            address(usdc),
+            address(settlementAsset),
             address(buyerElection),
             address(sellerElection),
             address(timelock), // governance 设为 timelock
@@ -158,8 +171,10 @@ contract MarketTest is Test {
         );
 
         // 7. 部署执行器并关联 Market
-        executor = new TradeExecutor(address(market), address(usdc));
+        executor = new TradeExecutor(address(market), address(settlementAsset));
         market.setExecutor(address(executor));
+        settlementAsset.setController(address(market), true);
+        settlementAsset.setController(address(executor), true);
 
         // 8. 授权权限
         buyerElection.setMinter(address(market));
@@ -181,6 +196,7 @@ contract MarketTest is Test {
 
         // 10. 权限移交 (Ownership Handover)
         market.transferOwnership(address(timelock));
+        settlementAsset.transferOwnership(address(timelock));
         buyerElection.transferOwnership(address(timelock));
         sellerElection.transferOwnership(address(timelock));
         buyerFactory.transferOwnership(address(timelock));
@@ -206,7 +222,7 @@ contract MarketTest is Test {
     function testMerchantRegistration() public {
         vm.startPrank(bob);
         uint256 depositAmount = 1000e6;
-        usdc.approve(address(market), depositAmount);
+        usdc.approve(address(settlementAsset), depositAmount);
 
         // 1. 适配新接口：现在的 registerMerchant 只有 1 个参数 (amount)
         market.registerMerchant(depositAmount);
@@ -251,7 +267,7 @@ contract MarketTest is Test {
         usdc.mint(address(merchantContract), depositAmount);
 
         vm.startPrank(address(merchantContract));
-        usdc.approve(address(market), depositAmount);
+        usdc.approve(address(settlementAsset), depositAmount);
         market.registerMerchant(depositAmount);
         vm.stopPrank();
 
@@ -266,13 +282,13 @@ contract MarketTest is Test {
         // ------------------ 差值测试开始 ------------------
 
         // 3. 记录交易前的各方余额
-        uint256 marketBalBefore = usdc.balanceOf(address(market));
+        uint256 marketBalBefore = usdc.balanceOf(address(settlementAsset));
         uint256 merchantBalBefore = usdc.balanceOf(address(merchantContract));
         uint256 vaultBalBefore = usdc.balanceOf(vault);
 
         // 4. Alice 执行交易
         vm.startPrank(alice);
-        usdc.approve(address(market), tradeAmount);
+        usdc.approve(address(settlementAsset), tradeAmount);
 
         uint160 rechargeTarget = uint160(alice);
         uint256 expectedNetAmount = tradeAmount - (tradeAmount / 100);
@@ -305,7 +321,7 @@ contract MarketTest is Test {
 
         // 市场合约（税池）应该净增加 deltaS
         assertEq(
-            usdc.balanceOf(address(market)) - marketBalBefore,
+            usdc.balanceOf(address(settlementAsset)) - marketBalBefore,
             expectedS,
             "Market tax pool should gain exactly deltaS"
         );
@@ -361,7 +377,7 @@ contract MarketTest is Test {
         uint256 tradeAmount = 100e6;
 
         vm.startPrank(bob);
-        usdc.approve(address(market), depositAmount);
+        usdc.approve(address(settlementAsset), depositAmount);
         market.registerMerchant(depositAmount);
         vm.stopPrank();
 
@@ -387,7 +403,7 @@ contract MarketTest is Test {
         );
 
         vm.startPrank(charlie);
-        usdc.approve(address(market), depositAmount);
+        usdc.approve(address(settlementAsset), depositAmount);
         market.registerMerchant(depositAmount);
         vm.stopPrank();
 
@@ -405,7 +421,7 @@ contract MarketTest is Test {
         uint256 sellerPointsBefore = market.sellerPoints(bob);
 
         vm.startPrank(alice);
-        usdc.approve(address(market), tradeAmount);
+        usdc.approve(address(settlementAsset), tradeAmount);
         market.trade(alice, bob, uint160(alice), tradeAmount, "");
         vm.stopPrank();
 
@@ -429,26 +445,26 @@ contract MarketTest is Test {
         // 1. 商家入驻 (Alice 必须有押金才有退税配额，否则 getAvailableQuota 为 0)
         vm.startPrank(alice);
         uint256 aliceDeposit = 1000e6;
-        usdc.approve(address(market), aliceDeposit);
+        usdc.approve(address(settlementAsset), aliceDeposit);
         market.registerMerchant(aliceDeposit);
         vm.stopPrank();
 
         // 2. 产生积分 (为了让 Alice 有双向积分)
         // 先让 Bob 入驻，作为卖方
         vm.startPrank(bob);
-        usdc.approve(address(market), 1000e6);
+        usdc.approve(address(settlementAsset), 1000e6);
         market.registerMerchant(1000e6);
         vm.stopPrank();
 
         // A. Alice 买 Bob 的 (产生 Alice 的买方积分)
         vm.startPrank(alice);
-        usdc.approve(address(market), 200e6);
+        usdc.approve(address(settlementAsset), 200e6);
         market.trade(alice, bob, uint160(alice), 200e6, "");
         vm.stopPrank();
 
         // B. Bob 买 Alice 的 (产生 Alice 的卖方积分)
         vm.startPrank(bob);
-        usdc.approve(address(market), 200e6);
+        usdc.approve(address(settlementAsset), 200e6);
         market.trade(bob, alice, uint160(bob), 200e6, "");
         vm.stopPrank();
 
@@ -579,14 +595,14 @@ contract MarketTest is Test {
         // 1. 准备：Bob 入驻
         vm.startPrank(bob);
         uint256 bobDeposit = 1000e6;
-        usdc.approve(address(market), bobDeposit);
+        usdc.approve(address(settlementAsset), bobDeposit);
         market.registerMerchant(bobDeposit);
         vm.stopPrank();
 
         // 2. 产生业务数据：Alice 买 Bob 的东西
         // 从而产生 Bob 的卖方积分和 AMM 状态
         vm.startPrank(alice);
-        usdc.approve(address(market), 100e6);
+        usdc.approve(address(settlementAsset), 100e6);
         market.trade(alice, bob, uint160(alice), 100e6, "");
         vm.stopPrank();
 

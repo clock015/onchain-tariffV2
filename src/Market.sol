@@ -2,7 +2,6 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
@@ -10,6 +9,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuardTransient.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import "./interfaces/ITradeExecutor.sol";
 import "./interfaces/IRightsToken.sol";
+import "./interfaces/ISettlementAsset.sol";
 
 contract Market is
     Initializable,
@@ -17,10 +17,9 @@ contract Market is
     UUPSUpgradeable,
     ReentrancyGuardTransient
 {
-    using SafeERC20 for IERC20;
     using FixedPointMathLib for uint256;
 
-    IERC20 public underlying;
+    ISettlementAsset public settlementAsset;
     IRightsToken public buyerRights;
     IRightsToken public sellerRights;
     address public vault;
@@ -76,14 +75,14 @@ contract Market is
     }
 
     function initialize(
-        address _underlying,
+        address _settlementAsset,
         address _buyerRights,
         address _sellerRights,
         address _governance,
         address _vault
     ) public initializer {
         __Ownable_init(msg.sender);
-        underlying = IERC20(_underlying);
+        settlementAsset = ISettlementAsset(_settlementAsset);
         buyerRights = IRightsToken(_buyerRights);
         sellerRights = IRightsToken(_sellerRights);
         governance = _governance;
@@ -97,6 +96,10 @@ contract Market is
     function _authorizeUpgrade(
         address newImplementation
     ) internal override onlyOwner {}
+
+    function underlying() external view returns (IERC20) {
+        return IERC20(settlementAsset.asset());
+    }
 
     function _getSurplus(address account) internal view returns (uint256) {
         uint256 sP = sellerPoints[account];
@@ -179,7 +182,7 @@ contract Market is
         uint256 newR = W >= newMaxW ? 0 : newMaxW - W;
         m.K = newR * newY;
 
-        underlying.safeTransferFrom(msg.sender, address(this), amount);
+        settlementAsset.pull(msg.sender, amount);
         emit MerchantRegistered(msg.sender, m.deposit, W);
     }
 
@@ -199,16 +202,14 @@ contract Market is
 
         uint256 vaultFee = amount / 100;
         uint256 netAmount = amount - vaultFee;
-        underlying.safeTransferFrom(msg.sender, address(this), amount);
-        underlying.safeTransfer(vault, vaultFee);
+        settlementAsset.pull(msg.sender, amount);
+        settlementAsset.push(vault, vaultFee);
 
         buyerPoints[buyer] += deltaS;
         sellerPoints[merchant] += deltaS;
 
         buyerRights.mint(buyer, vaultFee);
         sellerRights.mint(merchant, vaultFee);
-
-        underlying.safeTransfer(executor, deltaW);
         ITradeExecutor(executor).executeTrade(
             merchant,
             rechargeTarget,
@@ -227,7 +228,7 @@ contract Market is
         buyerPoints[account] -= actualClaim;
         sellerPoints[account] -= actualClaim;
         claimed[account] += actualClaim;
-        underlying.safeTransfer(account, actualClaim);
+        settlementAsset.push(account, actualClaim);
         emit TaxRefunded(account, actualClaim);
     }
 
@@ -273,7 +274,7 @@ contract Market is
             sellerPoints[merchant] = 0;
         }
         delete merchants[merchant];
-        underlying.safeTransfer(vault, slashedAmount);
+        settlementAsset.push(vault, slashedAmount);
         emit MerchantKicked(merchant, slashedAmount);
     }
 

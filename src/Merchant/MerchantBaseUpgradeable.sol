@@ -22,6 +22,7 @@ abstract contract MerchantBase is
     struct MerchantBaseStorage {
         address market;
         IERC20 underlying;
+        address settlementAsset;
         address buyerElection;
         address sellerElection;
         address beneficiary;
@@ -101,6 +102,7 @@ abstract contract MerchantBase is
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.market = _market;
         $.underlying = IERC20(_underlying);
+        $.settlementAsset = IMarket(_market).settlementAsset();
         $.buyerElection = _buyerElection;
         $.sellerElection = _sellerElection;
         $.tradeExecutor = _tradeExecutor;
@@ -117,6 +119,9 @@ abstract contract MerchantBase is
     }
     function underlying() public view returns (IERC20) {
         return _getMerchantBaseStorage().underlying;
+    }
+    function settlementAsset() public view returns (address) {
+        return _getMerchantBaseStorage().settlementAsset;
     }
     function beneficiary() public view returns (address) {
         return _getMerchantBaseStorage().beneficiary;
@@ -173,7 +178,7 @@ abstract contract MerchantBase is
     function register(uint256 amount) external virtual onlyOwner {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         _spendOwnerBalance(amount);
-        $.underlying.forceApprove($.market, amount);
+        $.underlying.forceApprove($.settlementAsset, amount);
         IMarket($.market).registerMerchant(amount);
     }
 
@@ -189,7 +194,7 @@ abstract contract MerchantBase is
             _spendOwnerBalance(amount);
         }
 
-        $.underlying.forceApprove($.market, amount);
+        $.underlying.forceApprove($.settlementAsset, amount);
         IMarket($.market).trade(buyer, merchant, rechargeTarget, amount, data);
     }
 
