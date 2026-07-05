@@ -20,7 +20,6 @@ contract Market is
     using SafeERC20 for IERC20;
     using FixedPointMathLib for uint256;
 
-    // --- 状态变量 ---
     IERC20 public underlying;
     IRightsToken public buyerRights;
     IRightsToken public sellerRights;
@@ -28,11 +27,11 @@ contract Market is
     address public governance;
 
     struct Merchant {
-        uint256 deposit; // D: 押金
+        uint256 deposit;
         bool isActive;
-        uint256 W; // W: 已提现现金总额 (实际业务意义)
-        uint256 leverageFactor; // 商家快照杠杆 (100基准)
-        uint256 virtualDepthRatio; // 商家快照深度比例 (10000基准)
+        uint256 K;
+        uint256 leverageFactor;
+        uint256 virtualDepthRatio;
     }
 
     mapping(address => Merchant) public merchants;
@@ -48,17 +47,14 @@ contract Market is
     uint256 public QUOTA_PERIOD;
     uint256 public quotaRatio;
 
-    // --- 全局默认参数 ---
-    uint256 public leverageFactor; // 默认最大利润押金比 (例如 1000 代表 10倍)
-    uint256 public virtualDepthRatio; // 默认最低关税基数 (例如 9000 代表 0.9)
+    uint256 public leverageFactor;
+    uint256 public virtualDepthRatio;
 
-    // --- 权限与检查 ---
     modifier notFromExecutor() {
         require(msg.sender != executor, "Executor cannot trigger trade");
         _;
     }
 
-    // --- 事件 ---
     event MerchantRegistered(
         address indexed merchant,
         uint256 deposit,
@@ -102,17 +98,12 @@ contract Market is
         address newImplementation
     ) internal override onlyOwner {}
 
-    // --- 核心数学逻辑 ---
-
     function _getSurplus(address account) internal view returns (uint256) {
         uint256 sP = sellerPoints[account];
         uint256 bP = buyerPoints[account];
         return sP > bP ? sP - bP : 0;
     }
 
-    /**
-     * @dev 同步商家参数快照。因为存储的是 W，同步时无需重新计算 W。
-     */
     function _syncMerchantParams(address merchant) internal {
         Merchant storage m = merchants[merchant];
         if (!m.isActive) return;
@@ -121,39 +112,33 @@ contract Market is
             m.virtualDepthRatio == virtualDepthRatio
         ) return;
 
+        uint256 S = _getSurplus(merchant);
+        uint256 oldMaxW = (m.deposit * m.leverageFactor) / 100;
+        uint256 oldY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
+        uint256 oldR = m.K / oldY;
+        uint256 W = oldMaxW - oldR;
+
         m.leverageFactor = leverageFactor;
         m.virtualDepthRatio = virtualDepthRatio;
+
+        uint256 newMaxW = (m.deposit * m.leverageFactor) / 100;
+        uint256 newY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
+        uint256 newR = W >= newMaxW ? 0 : newMaxW - W;
+        m.K = newR * newY;
     }
 
-    /**
-     * @notice 计算 AMM 分配
-     * 使用 (MaxW - W) * Y = K 原理计算
-     */
     function calculateAMM(
         address merchant,
         uint256 amount
     ) public view returns (uint256 deltaW, uint256 deltaS) {
         Merchant storage m = merchants[merchant];
         uint256 S = _getSurplus(merchant);
-        uint256 D = m.deposit;
-        uint256 MaxW = (D * m.leverageFactor) / 100;
-
-        // P = amount after the fixed 1% rights-token fee.
+        uint256 Y = S + ((m.deposit * m.virtualDepthRatio) / 10000);
         uint256 P = amount - (amount / 100);
-        // Y = S + virtualDepthRatio * D
-        uint256 Y = S + ((D * m.virtualDepthRatio) / 10000);
+        uint256 R = m.K / Y;
 
-        // 如果已提现 W 超过或等于当前最大额度 MaxW，则无法提取现金
-        if (m.W >= MaxW) {
-            return (0, P);
-        }
+        if (R == 0) return (0, P);
 
-        // 现金余额 R = MaxW - W
-        uint256 R = MaxW - m.W;
-        // 现场计算本次交易的临时 K = R * Y
-        // uint256 K = R * Y;
-
-        // 解二次方程: (R - deltaW)(Y + deltaS) = K 且 deltaW + deltaS = P
         int256 b = int256(R) + int256(Y) - int256(P);
         uint256 discriminant = uint256(b * b) + (4 * P * Y);
         uint256 root = FixedPointMathLib.sqrt(discriminant);
@@ -168,27 +153,34 @@ contract Market is
         deltaW = P - deltaS;
     }
 
-    // --- 核心业务 ---
-
     function registerMerchant(uint256 amount) external {
         require(amount > 0, "Deposit required");
 
         Merchant storage m = merchants[msg.sender];
+        uint256 S = _getSurplus(msg.sender);
+        uint256 W;
 
         if (m.isActive) {
             _syncMerchantParams(msg.sender);
-            // 直接追加押金，W 保持不变 (自然实现了 W 在新 MaxW 下的延续)
+            uint256 oldMaxW = (m.deposit * m.leverageFactor) / 100;
+            uint256 oldY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
+            uint256 oldR = m.K / oldY;
+            W = oldMaxW - oldR;
             m.deposit += amount;
         } else {
             m.isActive = true;
             m.deposit = amount;
-            m.W = 0; // 新商家已提现为 0
             m.leverageFactor = leverageFactor;
             m.virtualDepthRatio = virtualDepthRatio;
         }
 
+        uint256 newMaxW = (m.deposit * m.leverageFactor) / 100;
+        uint256 newY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
+        uint256 newR = W >= newMaxW ? 0 : newMaxW - W;
+        m.K = newR * newY;
+
         underlying.safeTransferFrom(msg.sender, address(this), amount);
-        emit MerchantRegistered(msg.sender, m.deposit, m.W);
+        emit MerchantRegistered(msg.sender, m.deposit, W);
     }
 
     function trade(
@@ -209,9 +201,6 @@ contract Market is
         uint256 netAmount = amount - vaultFee;
         underlying.safeTransferFrom(msg.sender, address(this), amount);
         underlying.safeTransfer(vault, vaultFee);
-
-        // 更新商家已提现现金总额 W
-        m.W += deltaW;
 
         buyerPoints[buyer] += deltaS;
         sellerPoints[merchant] += deltaS;
@@ -291,16 +280,21 @@ contract Market is
     function setVault(address _newVault) external onlyOwner {
         vault = _newVault;
     }
+
     function setExecutor(address _executor) external onlyOwner {
         executor = _executor;
     }
+
     function setQuotaParams(uint256 _newRatio) external onlyOwner {
         quotaRatio = _newRatio;
     }
+
     function setGlobalAMMParams(
         uint256 _leverage,
         uint256 _depthRatio
     ) external onlyOwner {
+        require(_leverage > 0, "Invalid leverage");
+        require(_depthRatio > 0, "Invalid depth ratio");
         leverageFactor = _leverage;
         virtualDepthRatio = _depthRatio;
     }

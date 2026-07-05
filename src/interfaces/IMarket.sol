@@ -9,7 +9,7 @@ interface IMarket {
     struct Merchant {
         uint256 deposit; // 商家押金 (USDC)
         bool isActive; // 商家准入状态
-        uint256 W; // 已提现现金总额
+        uint256 K; // AMM invariant
         uint256 leverageFactor; // 商家快照杠杆
         uint256 virtualDepthRatio; // 商家快照深度比例
     }
@@ -27,7 +27,7 @@ interface IMarket {
         returns (
             uint256 deposit,
             bool isActive,
-            uint256 W,
+            uint256 K,
             uint256 leverageFactor,
             uint256 virtualDepthRatio
         );

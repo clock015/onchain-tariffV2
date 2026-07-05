@@ -212,11 +212,11 @@ contract MarketTest is Test {
         market.registerMerchant(depositAmount);
 
         // 2. 适配新结构体解构：现在返回 5 个字段
-        // (uint256 deposit, bool isActive, uint256 W, uint256 lev, uint256 vDepth)
+        // (uint256 deposit, bool isActive, uint256 K, uint256 lev, uint256 vDepth)
         (
             uint256 deposit,
             bool isActive,
-            uint256 withdrawnW,
+            uint256 k,
             uint256 levFactor,
             uint256 vDepthRatio
         ) = market.merchants(bob);
@@ -224,7 +224,10 @@ contract MarketTest is Test {
         // 3. 断言验证
         assertEq(deposit, depositAmount, "Deposit mismatch");
         assertTrue(isActive, "Merchant should be active");
-        assertEq(withdrawnW, 0, "Initial W should be 0");
+        uint256 expectedK =
+            ((depositAmount * market.leverageFactor()) / 100) *
+            ((depositAmount * market.virtualDepthRatio()) / 10000);
+        assertEq(k, expectedK, "Initial K mismatch");
 
         // 验证参数快照是否成功同步了全局默认值
         assertEq(
@@ -307,9 +310,7 @@ contract MarketTest is Test {
             "Market tax pool should gain exactly deltaS"
         );
 
-        // 6. 验证商家状态更新和充值回调参数
-        (, , uint256 wAfter, , ) = market.merchants(address(merchantContract));
-        assertEq(wAfter, expectedW, "Merchant W should be updated by deltaW");
+        // 6. 验证充值回调参数
         assertEq(
             merchantContract.lastRechargeTarget(),
             rechargeTarget,
@@ -352,6 +353,76 @@ contract MarketTest is Test {
             sellerElection.getVotes(address(merchantContract)),
             100 * 1e18
         );
+    }
+
+
+    function testGlobalAMMParamsAffectNextTrade() public {
+        uint256 depositAmount = 1000e6;
+        uint256 tradeAmount = 100e6;
+
+        vm.startPrank(bob);
+        usdc.approve(address(market), depositAmount);
+        market.registerMerchant(depositAmount);
+        vm.stopPrank();
+
+        (uint256 oldExpectedW, uint256 oldExpectedS) = market.calculateAMM(
+            bob,
+            tradeAmount
+        );
+
+        uint256 newLeverage = 400;
+        uint256 newDepthRatio = 18000;
+        vm.prank(address(timelock));
+        market.setGlobalAMMParams(newLeverage, newDepthRatio);
+
+        assertEq(
+            market.leverageFactor(),
+            newLeverage,
+            "Global leverage mismatch"
+        );
+        assertEq(
+            market.virtualDepthRatio(),
+            newDepthRatio,
+            "Global depth mismatch"
+        );
+
+        vm.startPrank(charlie);
+        usdc.approve(address(market), depositAmount);
+        market.registerMerchant(depositAmount);
+        vm.stopPrank();
+
+        (uint256 newExpectedW, uint256 newExpectedS) = market.calculateAMM(
+            charlie,
+            tradeAmount
+        );
+
+        assertTrue(
+            oldExpectedW != newExpectedW || oldExpectedS != newExpectedS,
+            "AMM params should change tariff calculation"
+        );
+
+        uint256 bobBalanceBefore = usdc.balanceOf(bob);
+        uint256 sellerPointsBefore = market.sellerPoints(bob);
+
+        vm.startPrank(alice);
+        usdc.approve(address(market), tradeAmount);
+        market.trade(alice, bob, uint160(alice), tradeAmount, "");
+        vm.stopPrank();
+
+        assertEq(
+            usdc.balanceOf(bob) - bobBalanceBefore,
+            newExpectedW,
+            "Trade should use synced deltaW"
+        );
+        assertEq(
+            market.sellerPoints(bob) - sellerPointsBefore,
+            newExpectedS,
+            "Trade should use synced deltaS"
+        );
+
+        (, , , uint256 levFactor, uint256 vDepthRatio) = market.merchants(bob);
+        assertEq(levFactor, newLeverage, "Merchant leverage snapshot mismatch");
+        assertEq(vDepthRatio, newDepthRatio, "Merchant depth snapshot mismatch");
     }
 
     function testTaxRefund() public {
@@ -513,20 +584,20 @@ contract MarketTest is Test {
         vm.stopPrank();
 
         // 2. 产生业务数据：Alice 买 Bob 的东西
-        // 从而产生 Bob 的卖方积分和已提现金额 W
+        // 从而产生 Bob 的卖方积分和 AMM 状态
         vm.startPrank(alice);
         usdc.approve(address(market), 100e6);
         market.trade(alice, bob, uint160(alice), 100e6, "");
         vm.stopPrank();
 
         // 记录没收前状态
-        (, , uint256 wBefore, , ) = market.merchants(bob);
+        (, , uint256 kBefore, , ) = market.merchants(bob);
         uint256 bobPointsBefore = market.sellerPoints(bob);
         uint256 vaultPointsBefore = market.sellerPoints(vault);
         uint256 vaultBalBefore = usdc.balanceOf(vault);
 
         assertTrue(bobPointsBefore > 0, "Bob should have points before kick");
-        assertTrue(wBefore > 0, "Bob should have accumulated W before kick");
+        assertTrue(kBefore > 0, "Bob should have K before kick");
 
         // 3. 权限校验：普通人无法踢出商家
         vm.startPrank(alice);
@@ -542,14 +613,14 @@ contract MarketTest is Test {
         (
             uint256 deposit,
             bool isActive,
-            uint256 W,
+            uint256 K,
             uint256 lev,
             uint256 vDepth
         ) = market.merchants(bob);
 
         assertEq(deposit, 0, "Deposit should be cleared");
         assertFalse(isActive, "Merchant should be inactive");
-        assertEq(W, 0, "Withdrawn W should be reset");
+        assertEq(K, 0, "K should be reset");
         assertEq(lev, 0, "Leverage snapshot should be cleared");
         assertEq(vDepth, 0, "Virtual depth snapshot should be cleared");
 
