@@ -58,7 +58,6 @@ abstract contract MerchantBase is
     );
     event OwnerBalanceCredited(uint256 amount, uint256 newBalance);
     event OwnerBalanceSpent(uint256 amount, uint256 newBalance);
-    event RefundForwarded(address indexed beneficiary, uint256 amount);
 
     modifier onlyTradeExecutor() {
         require(
@@ -214,20 +213,6 @@ abstract contract MerchantBase is
         bytes calldata data
     ) internal virtual;
 
-    function claimAndForward() external virtual {
-        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
-        uint256 balBefore = $.underlying.balanceOf(address(this));
-
-        IMarket($.market).claimTaxRefund(address(this));
-
-        uint256 balAfter = $.underlying.balanceOf(address(this));
-        uint256 refundAmount = balAfter - balBefore;
-
-        if (refundAmount > 0) {
-            $.underlying.safeTransfer($.beneficiary, refundAmount);
-            emit RefundForwarded($.beneficiary, refundAmount);
-        }
-    }
 
     function delegateVotesToBeneficiary() external virtual onlyOwner {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();

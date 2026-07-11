@@ -74,7 +74,6 @@ contract MarketTest is Test {
         vm.warp(365 days + 30 days);
         vm.startPrank(admin);
 
-        // 1. 部署基础资产
         usdc = new MockUSDC();
         ERC20SettlementAsset settlementImpl = new ERC20SettlementAsset();
         bytes memory settlementInitData = abi.encodeWithSelector(
@@ -89,7 +88,6 @@ contract MarketTest is Test {
         );
         merchantContract = new MockBusiness();
 
-        // 2. 部署治理代币工厂
         buyerFactory = new SeatTokenFactory();
         sellerFactory = new SeatTokenFactory();
 
@@ -105,8 +103,7 @@ contract MarketTest is Test {
         );
         buyerGenesisSeat.mint(admin, 100 * 1e18);
         sellerGenesisSeat.mint(admin, 100 * 1e18);
-        // 3. 部署 ProportionalElection (使用代理模式)
-        // --- 买方选举合约 ---
+
         ProportionalElection buyerElectionImpl = new ProportionalElection();
         bytes memory buyerElectionInit = abi.encodeWithSelector(
             ProportionalElection.initialize.selector,
@@ -120,7 +117,6 @@ contract MarketTest is Test {
             )
         );
 
-        // --- 卖方选举合约 ---
         ProportionalElection sellerElectionImpl = new ProportionalElection();
         bytes memory sellerElectionInit = abi.encodeWithSelector(
             ProportionalElection.initialize.selector,
@@ -144,43 +140,37 @@ contract MarketTest is Test {
         assertEq(sellerElection.currentRoundId(), 1, "Seller election should start at round 1");
         assertEq(buyerElection.getVotes(admin), 100 * 1e18, "Genesis buyer votes mismatch");
         assertEq(sellerElection.getVotes(admin), 100 * 1e18, "Genesis seller votes mismatch");
-        // 4. 绑定工厂与选举合约代理地址
+
         buyerFactory.setElectionContract(address(buyerElection));
         sellerFactory.setElectionContract(address(sellerElection));
 
-        // 5. 提前部署 TimelockController (用于 Market 初始化)
         address[] memory proposers = new address[](1);
         proposers[0] = admin;
         address[] memory executorsGov = new address[](1);
         executorsGov[0] = address(0);
-
         timelock = new TimelockController(0, proposers, executorsGov, admin);
 
-        // 6. 部署 Market (使用代理模式)
         Market marketImpl = new Market();
         bytes memory marketInitData = abi.encodeWithSelector(
             Market.initialize.selector,
             address(settlementAsset),
             address(buyerElection),
             address(sellerElection),
-            address(timelock), // governance 设为 timelock
+            address(timelock),
             vault
         );
         market = Market(
             address(new ERC1967Proxy(address(marketImpl), marketInitData))
         );
 
-        // 7. 部署执行器并关联 Market
         executor = new TradeExecutor(address(market), address(settlementAsset));
         market.setExecutor(address(executor));
         settlementAsset.setController(address(market), true);
         settlementAsset.setController(address(executor), true);
 
-        // 8. 授权权限
         buyerElection.setMinter(address(market));
         sellerElection.setMinter(address(market));
 
-        // 9. 部署治理中心 FinalGovernor
         FinalGovernor governorImpl = new FinalGovernor();
         bytes memory govInitData = abi.encodeWithSelector(
             FinalGovernor.initialize.selector,
@@ -194,7 +184,6 @@ contract MarketTest is Test {
             )
         );
 
-        // 10. 权限移交 (Ownership Handover)
         market.transferOwnership(address(timelock));
         settlementAsset.transferOwnership(address(timelock));
         buyerElection.transferOwnership(address(timelock));
@@ -202,60 +191,28 @@ contract MarketTest is Test {
         buyerFactory.transferOwnership(address(timelock));
         sellerFactory.transferOwnership(address(timelock));
 
-        // 治理角色配置
         timelock.grantRole(timelock.PROPOSER_ROLE(), address(governor));
         timelock.grantRole(timelock.CANCELLER_ROLE(), address(governor));
-
-        // 彻底去中心化
         timelock.renounceRole(timelock.DEFAULT_ADMIN_ROLE(), admin);
 
         vm.stopPrank();
 
-        // 11. 分发测试代币
         usdc.mint(alice, INITIAL_BALANCE);
         usdc.mint(bob, INITIAL_BALANCE);
         usdc.mint(charlie, INITIAL_BALANCE);
     }
 
-    // --- 业务逻辑测试 ---
-
     function testMerchantRegistration() public {
         vm.startPrank(bob);
         uint256 depositAmount = 1000e6;
         usdc.approve(address(settlementAsset), depositAmount);
-
-        // 1. 适配新接口：现在的 registerMerchant 只有 1 个参数 (amount)
         market.registerMerchant(depositAmount);
 
-        // 2. 适配新结构体解构：现在返回 5 个字段
-        // (uint256 deposit, bool isActive, uint256 K, uint256 lev, uint256 vDepth)
-        (
-            uint256 deposit,
-            bool isActive,
-            uint256 k,
-            uint256 levFactor,
-            uint256 vDepthRatio
-        ) = market.merchants(bob);
+        (uint256 deposit, bool isActive) = market.merchants(bob);
 
-        // 3. 断言验证
         assertEq(deposit, depositAmount, "Deposit mismatch");
         assertTrue(isActive, "Merchant should be active");
-        uint256 expectedK =
-            ((depositAmount * market.leverageFactor()) / 100) *
-            ((depositAmount * market.virtualDepthRatio()) / 10000);
-        assertEq(k, expectedK, "Initial K mismatch");
-
-        // 验证参数快照是否成功同步了全局默认值
-        assertEq(
-            levFactor,
-            market.leverageFactor(),
-            "Leverage snapshot mismatch"
-        );
-        assertEq(
-            vDepthRatio,
-            market.virtualDepthRatio(),
-            "Virtual depth snapshot mismatch"
-        );
+        assertEq(market.netTradeBalance(bob), 0, "Initial net balance mismatch");
 
         vm.stopPrank();
     }
@@ -278,6 +235,38 @@ contract MarketTest is Test {
             address(merchantContract),
             tradeAmount
         );
+        uint256 vaultFee = tradeAmount / 100;
+        uint256 tradeValue = tradeAmount - vaultFee;
+        (uint256 merchantDeposit, ) = market.merchants(address(merchantContract));
+        uint256 capacity = merchantDeposit * market.capacityMultiplier();
+        uint256 oldP = 0;
+        uint256 newP = tradeValue;
+        uint256 oldCurveTax = market.curveTax(oldP, merchantDeposit);
+        uint256 newCurveTax = market.curveTax(newP, merchantDeposit);
+        uint256 pOverCapacityBps = (newP * 10000) / capacity;
+        uint256 baseTaxPart = (tradeValue * market.baseTaxRate()) / 10000;
+        uint256 curveExtraTaxPart = expectedS - baseTaxPart;
+        uint256 effectiveTaxRateBps = (expectedS * 10000) / tradeValue;
+
+        console.log("=== AMM Tax Debug ===");
+        console.log("amount", tradeAmount);
+        console.log("vaultFee", vaultFee);
+        console.log("tradeValue", tradeValue);
+        console.log("deposit", merchantDeposit);
+        console.log("capacity", capacity);
+        console.log("baseTaxRate", market.baseTaxRate());
+        console.log("capacityMultiplier", market.capacityMultiplier());
+        console.log("curveExponent", market.curveExponent());
+        console.log("oldP", oldP);
+        console.log("newP", newP);
+        console.log("pOverCapacityBps", pOverCapacityBps);
+        console.log("oldCurveTax", oldCurveTax);
+        console.log("newCurveTax", newCurveTax);
+        console.log("baseTaxPart", baseTaxPart);
+        console.log("curveExtraTaxPart", curveExtraTaxPart);
+        console.log("deltaS", expectedS);
+        console.log("deltaW", expectedW);
+        console.log("effectiveTaxRateBps", effectiveTaxRateBps);
 
         // ------------------ 差值测试开始 ------------------
 
@@ -348,12 +337,7 @@ contract MarketTest is Test {
             "Recharge data mismatch"
         );
 
-        // 7. 验证积分账本 (积分现在等于 deltaS)
-        assertEq(
-            market.buyerPoints(alice),
-            expectedS,
-            "Buyer should get deltaS points"
-        );
+        // 7. 验证卖方已收税账本
         assertEq(
             market.sellerPoints(address(merchantContract)),
             expectedS,
@@ -386,20 +370,30 @@ contract MarketTest is Test {
             tradeAmount
         );
 
-        uint256 newLeverage = 400;
-        uint256 newDepthRatio = 18000;
+        uint256 newBaseTaxRate = 1800;
+        uint256 newCapacityMultiplier = 5;
+        uint256 newCurveExponent = 2;
         vm.prank(address(timelock));
-        market.setGlobalAMMParams(newLeverage, newDepthRatio);
+        market.setGlobalAMMParams(
+            newBaseTaxRate,
+            newCapacityMultiplier,
+            newCurveExponent
+        );
 
         assertEq(
-            market.leverageFactor(),
-            newLeverage,
-            "Global leverage mismatch"
+            market.baseTaxRate(),
+            newBaseTaxRate,
+            "Global base tax mismatch"
         );
         assertEq(
-            market.virtualDepthRatio(),
-            newDepthRatio,
-            "Global depth mismatch"
+            market.capacityMultiplier(),
+            newCapacityMultiplier,
+            "Global capacity mismatch"
+        );
+        assertEq(
+            market.curveExponent(),
+            newCurveExponent,
+            "Global exponent mismatch"
         );
 
         vm.startPrank(charlie);
@@ -435,96 +429,241 @@ contract MarketTest is Test {
             newExpectedS,
             "Trade should use synced deltaS"
         );
-
-        (, , , uint256 levFactor, uint256 vDepthRatio) = market.merchants(bob);
-        assertEq(levFactor, newLeverage, "Merchant leverage snapshot mismatch");
-        assertEq(vDepthRatio, newDepthRatio, "Merchant depth snapshot mismatch");
     }
 
-    function testTaxRefund() public {
-        // 1. 商家入驻 (Alice 必须有押金才有退税配额，否则 getAvailableQuota 为 0)
+    function testTradeAutoRefundsOwnSellerPoints() public {
+        uint256 depositAmount = 1000e6;
+        uint256 tradeAmount = 100e6;
+        uint256 secondTradeAmount = 200e6;
+
         vm.startPrank(alice);
-        uint256 aliceDeposit = 1000e6;
-        usdc.approve(address(settlementAsset), aliceDeposit);
-        market.registerMerchant(aliceDeposit);
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount);
         vm.stopPrank();
 
-        // 2. 产生积分 (为了让 Alice 有双向积分)
-        // 先让 Bob 入驻，作为卖方
         vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), 1000e6);
-        market.registerMerchant(1000e6);
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount);
         vm.stopPrank();
 
-        // A. Alice 买 Bob 的 (产生 Alice 的买方积分)
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), tradeAmount);
+        market.trade(bob, alice, uint160(bob), tradeAmount, "");
+        vm.stopPrank();
+
+        uint256 sellerPointsBefore = market.sellerPoints(alice);
+        uint256 quotaBefore = market.getAvailableQuota(alice);
+        (, uint256 expectedS) = market.calculateAMM(bob, secondTradeAmount);
+
+        uint256 expectedAutoRefund = sellerPointsBefore < expectedS
+            ? sellerPointsBefore
+            : expectedS;
+        if (expectedAutoRefund > quotaBefore) expectedAutoRefund = quotaBefore;
+
+        uint256 balanceBefore = usdc.balanceOf(alice);
         vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), 200e6);
-        market.trade(alice, bob, uint160(alice), 200e6, "");
+        usdc.approve(address(settlementAsset), secondTradeAmount);
+        market.trade(alice, bob, uint160(alice), secondTradeAmount, "");
         vm.stopPrank();
+        uint256 balanceAfter = usdc.balanceOf(alice);
 
-        // B. Bob 买 Alice 的 (产生 Alice 的卖方积分)
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), 200e6);
-        market.trade(bob, alice, uint160(bob), 200e6, "");
-        vm.stopPrank();
-
-        // 3. 准备退税断言数据
-        uint256 bP = market.buyerPoints(alice);
-        uint256 sP = market.sellerPoints(alice);
-        uint256 refundablePoints = bP < sP ? bP : sP;
-
-        // 初始配额应为押金的 50%
-        uint256 availableQuota = market.getAvailableQuota(alice);
         assertEq(
-            availableQuota,
-            (aliceDeposit * 5000) / 10000,
-            "Initial quota mismatch"
-        );
-
-        // 实际退税额 = min(可对冲积分, 可用配额)
-        uint256 expectedClaim = refundablePoints > availableQuota
-            ? availableQuota
-            : refundablePoints;
-        assertTrue(
-            expectedClaim > 0,
-            "Expected claim should be greater than 0"
-        );
-
-        // 4. 执行退税
-        uint256 balBefore = usdc.balanceOf(alice);
-        vm.prank(alice);
-        market.claimTaxRefund(alice);
-        uint256 balAfter = usdc.balanceOf(alice);
-
-        // 5. 断言验证
-        assertEq(
-            balAfter - balBefore,
-            expectedClaim,
-            "USDC refund amount mismatch"
-        );
-        assertEq(
-            market.claimed(alice),
-            expectedClaim,
-            "Claimed mapping update mismatch"
-        );
-
-        // 验证积分扣减
-        assertEq(
-            market.buyerPoints(alice),
-            bP - expectedClaim,
-            "Buyer points deduction mismatch"
+            balanceBefore - balanceAfter,
+            secondTradeAmount - expectedAutoRefund,
+            "Buyer should receive automatic refund"
         );
         assertEq(
             market.sellerPoints(alice),
-            sP - expectedClaim,
-            "Seller points deduction mismatch"
+            sellerPointsBefore - expectedAutoRefund,
+            "Own seller points should be consumed"
         );
-
-        // 验证配额消耗
+        assertEq(
+            market.claimed(alice),
+            expectedAutoRefund,
+            "Auto refund should update claimed amount"
+        );
         assertEq(
             market.getAvailableQuota(alice),
-            availableQuota - expectedClaim,
-            "Quota consumption mismatch"
+            quotaBefore - expectedAutoRefund,
+            "Auto refund should consume quota"
+        );
+    }
+
+    function testDepositRevaluationDoesNotConsumeRefundQuota() public {
+        uint256 initialDeposit = 1000e6;
+        uint256 additionalDeposit = 1000e6;
+        uint256 tradeAmount = 100e6;
+
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), initialDeposit);
+        market.registerMerchant(initialDeposit);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), tradeAmount);
+        market.trade(bob, alice, uint160(bob), tradeAmount, "");
+        vm.stopPrank();
+
+        uint256 sellerPointsBefore = market.sellerPoints(alice);
+        uint256 positiveBalance = uint256(market.netTradeBalance(alice));
+        uint256 oldTax = market.curveTax(positiveBalance, initialDeposit);
+        uint256 newTax = market.curveTax(
+            positiveBalance,
+            initialDeposit + additionalDeposit
+        );
+        uint256 expectedCredit = oldTax - newTax;
+        if (expectedCredit > sellerPointsBefore) {
+            expectedCredit = sellerPointsBefore;
+        }
+        if (expectedCredit > additionalDeposit) {
+            expectedCredit = additionalDeposit;
+        }
+
+        uint256 balanceBefore = usdc.balanceOf(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), additionalDeposit);
+        market.registerMerchant(additionalDeposit);
+        vm.stopPrank();
+
+        assertEq(
+            balanceBefore - usdc.balanceOf(alice),
+            additionalDeposit - expectedCredit,
+            "Revaluation credit should reduce deposit payment"
+        );
+        assertEq(
+            market.sellerPoints(alice),
+            sellerPointsBefore - expectedCredit,
+            "Revaluation credit should consume collected tax"
+        );
+        assertEq(market.claimed(alice), 0, "Credit is not a consumer refund");
+        assertEq(
+            market.lastClaimTime(alice),
+            0,
+            "Credit should not start the quota recovery period"
+        );
+        assertEq(
+            market.lastAvailableQuota(alice),
+            0,
+            "Credit should not consume refund quota"
+        );
+    }
+
+    function testTradeDoesNotAutoRefundWhenPayerIsNotBuyer() public {
+        uint256 depositAmount = 1000e6;
+        uint256 tradeAmount = 100e6;
+        uint256 secondTradeAmount = 200e6;
+
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), tradeAmount);
+        market.trade(bob, alice, uint160(bob), tradeAmount, "");
+        vm.stopPrank();
+
+        uint256 sellerPointsBefore = market.sellerPoints(alice);
+        uint256 quotaBefore = market.getAvailableQuota(alice);
+
+        uint256 balanceBefore = usdc.balanceOf(charlie);
+        vm.startPrank(charlie);
+        usdc.approve(address(settlementAsset), secondTradeAmount);
+        market.trade(alice, bob, uint160(alice), secondTradeAmount, "");
+        vm.stopPrank();
+        uint256 balanceAfter = usdc.balanceOf(charlie);
+
+        assertEq(
+            balanceBefore - balanceAfter,
+            secondTradeAmount,
+            "Payer should not receive buyer refund"
+        );
+        assertEq(
+            market.sellerPoints(alice),
+            sellerPointsBefore,
+            "Buyer seller points should not be consumed by payer"
+        );
+        assertEq(market.claimed(alice), 0, "No auto refund should be claimed");
+        assertEq(
+            market.getAvailableQuota(alice),
+            quotaBefore,
+            "Quota should not be consumed"
+        );
+    }
+
+    function testMissedThirdPartyRefundIsRecoveredByBuyerLater() public {
+        uint256 depositAmount = 1000e6;
+        uint256 firstTradeAmount = 100e6;
+        uint256 thirdPartyTradeAmount = 200e6;
+        uint256 catchUpTradeAmount = 10e6;
+
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount);
+        usdc.approve(address(settlementAsset), firstTradeAmount);
+        market.trade(bob, alice, uint160(bob), firstTradeAmount, "");
+        vm.stopPrank();
+
+        uint256 collectedTax = market.sellerPoints(alice);
+
+        vm.startPrank(charlie);
+        usdc.approve(address(settlementAsset), thirdPartyTradeAmount);
+        market.trade(
+            alice,
+            bob,
+            uint160(alice),
+            thirdPartyTradeAmount,
+            ""
+        );
+        vm.stopPrank();
+
+        assertEq(
+            market.sellerPoints(alice),
+            collectedTax,
+            "Third-party payer should leave refund pending"
+        );
+
+        uint256 quotaBefore = market.getAvailableQuota(alice);
+        uint256 catchUpTradeValue = catchUpTradeAmount -
+            (catchUpTradeAmount / 100);
+        uint256 expectedRefund = collectedTax < quotaBefore
+            ? collectedTax
+            : quotaBefore;
+        if (expectedRefund > catchUpTradeValue) {
+            expectedRefund = catchUpTradeValue;
+        }
+
+        uint256 balanceBefore = usdc.balanceOf(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), catchUpTradeAmount);
+        market.trade(
+            alice,
+            bob,
+            uint160(alice),
+            catchUpTradeAmount,
+            ""
+        );
+        vm.stopPrank();
+
+        assertEq(
+            balanceBefore - usdc.balanceOf(alice),
+            catchUpTradeAmount - expectedRefund,
+            "Buyer should recover the previously pending refund"
+        );
+        assertEq(
+            market.sellerPoints(alice),
+            collectedTax - expectedRefund,
+            "Recovered refund should reduce collected tax"
         );
     }
 
@@ -607,13 +746,13 @@ contract MarketTest is Test {
         vm.stopPrank();
 
         // 记录没收前状态
-        (, , uint256 kBefore, , ) = market.merchants(bob);
+        int256 netBalanceBefore = market.netTradeBalance(bob);
         uint256 bobPointsBefore = market.sellerPoints(bob);
         uint256 vaultPointsBefore = market.sellerPoints(vault);
         uint256 vaultBalBefore = usdc.balanceOf(vault);
 
         assertTrue(bobPointsBefore > 0, "Bob should have points before kick");
-        assertTrue(kBefore > 0, "Bob should have K before kick");
+        assertTrue(netBalanceBefore > 0, "Bob should have net balance before kick");
 
         // 3. 权限校验：普通人无法踢出商家
         vm.startPrank(alice);
@@ -626,19 +765,11 @@ contract MarketTest is Test {
         market.kickMerchant(bob);
 
         // 5. 验证商家结构体被彻底清除 (delete merchants[merchant])
-        (
-            uint256 deposit,
-            bool isActive,
-            uint256 K,
-            uint256 lev,
-            uint256 vDepth
-        ) = market.merchants(bob);
+        (uint256 deposit, bool isActive) = market.merchants(bob);
 
         assertEq(deposit, 0, "Deposit should be cleared");
         assertFalse(isActive, "Merchant should be inactive");
-        assertEq(K, 0, "K should be reset");
-        assertEq(lev, 0, "Leverage snapshot should be cleared");
-        assertEq(vDepth, 0, "Virtual depth snapshot should be cleared");
+        assertEq(market.netTradeBalance(bob), 0, "Net balance should be reset");
 
         // 6. 验证资产没收：押金进入金库 (Vault)
         assertEq(

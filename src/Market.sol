@@ -17,7 +17,9 @@ contract Market is
     UUPSUpgradeable,
     ReentrancyGuardTransient
 {
-    using FixedPointMathLib for uint256;
+    uint256 public constant BPS = 10000;
+    uint256 public constant WAD = 1e18;
+    uint256 public constant MAX_CURVE_EXPONENT = 10;
 
     ISettlementAsset public settlementAsset;
     IRightsToken public buyerRights;
@@ -28,15 +30,22 @@ contract Market is
     struct Merchant {
         uint256 deposit;
         bool isActive;
-        uint256 K;
-        uint256 leverageFactor;
-        uint256 virtualDepthRatio;
+    }
+
+    struct TradeCalculation {
+        uint256 vaultFee;
+        uint256 tradeValue;
+        uint256 deltaW;
+        uint256 deltaS;
+        uint256 buyerRefund;
+        int256 newSellerBalance;
+        int256 newBuyerBalance;
     }
 
     mapping(address => Merchant) public merchants;
-    mapping(address => uint256) public buyerPoints;
     mapping(address => uint256) public sellerPoints;
     mapping(address => uint256) public claimed;
+    mapping(address => int256) public netTradeBalance;
 
     address public executor;
 
@@ -46,8 +55,9 @@ contract Market is
     uint256 public QUOTA_PERIOD;
     uint256 public quotaRatio;
 
-    uint256 public leverageFactor;
-    uint256 public virtualDepthRatio;
+    uint256 public baseTaxRate;
+    uint256 public capacityMultiplier;
+    uint256 public curveExponent;
 
     modifier notFromExecutor() {
         require(msg.sender != executor, "Executor cannot trigger trade");
@@ -56,8 +66,7 @@ contract Market is
 
     event MerchantRegistered(
         address indexed merchant,
-        uint256 deposit,
-        uint256 W
+        uint256 deposit
     );
     event Traded(
         address indexed payer,
@@ -67,6 +76,7 @@ contract Market is
         uint256 W,
         uint256 deltaS
     );
+    event TradeBalanceUpdated(address indexed account, int256 netTradeBalance);
     event TaxRefunded(address indexed account, uint256 amount);
     event MerchantKicked(address indexed merchant, uint256 slashedAmount);
 
@@ -89,8 +99,9 @@ contract Market is
         vault = _vault;
         QUOTA_PERIOD = 30 days;
         quotaRatio = 5000;
-        leverageFactor = 800;
-        virtualDepthRatio = 9000;
+        baseTaxRate = 900;
+        capacityMultiplier = 5;
+        curveExponent = 2;
     }
 
     function _authorizeUpgrade(
@@ -101,89 +112,182 @@ contract Market is
         return IERC20(settlementAsset.asset());
     }
 
-    function _getSurplus(address account) internal view returns (uint256) {
-        uint256 sP = sellerPoints[account];
-        uint256 bP = buyerPoints[account];
-        return sP > bP ? sP - bP : 0;
+    function _positive(int256 value) internal pure returns (uint256) {
+        return value > 0 ? uint256(value) : 0;
     }
 
-    function _syncMerchantParams(address merchant) internal {
-        Merchant storage m = merchants[merchant];
-        if (!m.isActive) return;
-        if (
-            m.leverageFactor == leverageFactor &&
-            m.virtualDepthRatio == virtualDepthRatio
-        ) return;
+    function _toInt256(uint256 value) internal pure returns (int256) {
+        require(value <= uint256(type(int256).max), "Value too large");
+        return int256(value);
+    }
 
-        uint256 S = _getSurplus(merchant);
-        uint256 oldMaxW = (m.deposit * m.leverageFactor) / 100;
-        uint256 oldY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
-        uint256 oldR = m.K / oldY;
-        uint256 W = oldMaxW - oldR;
+    function curveTax(
+        uint256 P,
+        uint256 deposit
+    ) external view returns (uint256) {
+        return _curveTax(P, deposit);
+    }
 
-        m.leverageFactor = leverageFactor;
-        m.virtualDepthRatio = virtualDepthRatio;
+    function _curveTax(
+        uint256 P,
+        uint256 deposit
+    ) internal view returns (uint256) {
+        if (P == 0) return 0;
+        require(deposit > 0, "Deposit required");
 
-        uint256 newMaxW = (m.deposit * m.leverageFactor) / 100;
-        uint256 newY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
-        uint256 newR = W >= newMaxW ? 0 : newMaxW - W;
-        m.K = newR * newY;
+        uint256 capacity = deposit * capacityMultiplier;
+        require(capacity > 0, "Invalid capacity");
+        require(P <= capacity, "Capacity exceeded");
+
+        uint256 baseTax = FixedPointMathLib.fullMulDivUp(P, baseTaxRate, BPS);
+        uint256 variableRate = BPS - baseTaxRate;
+        if (variableRate == 0) return baseTax > P ? P : baseTax;
+
+        uint256 ratio = FixedPointMathLib.fullMulDiv(P, WAD, capacity);
+        uint256 ratioPow = FixedPointMathLib.rpow(ratio, curveExponent, WAD);
+        uint256 variableBase = FixedPointMathLib.fullMulDivUp(
+            P,
+            variableRate,
+            BPS
+        );
+        uint256 variableTax = FixedPointMathLib.fullMulDivUp(
+            variableBase,
+            ratioPow,
+            WAD * (curveExponent + 1)
+        );
+        uint256 tax = baseTax + variableTax;
+        return tax > P ? P : tax;
+    }
+
+    function _accountCurveTax(
+        address account,
+        uint256 positiveBalance
+    ) internal view returns (uint256) {
+        if (positiveBalance == 0) return 0;
+        uint256 deposit = merchants[account].deposit;
+        if (deposit == 0) return 0;
+        return _curveTax(positiveBalance, deposit);
+    }
+
+    function _capTaxRefund(
+        address account,
+        uint256 requestedRefund
+    ) internal view returns (uint256 refund) {
+        uint256 collectedTax = sellerPoints[account];
+        uint256 availableQuota = getAvailableQuota(account);
+        refund = requestedRefund < collectedTax ? requestedRefund : collectedTax;
+        if (refund > availableQuota) refund = availableQuota;
+    }
+
+    function _applyTaxRefund(
+        address account,
+        uint256 requestedRefund
+    ) internal returns (uint256 refund) {
+        refund = _capTaxRefund(account, requestedRefund);
+        if (refund == 0) return 0;
+
+        uint256 availableQuota = getAvailableQuota(account);
+        sellerPoints[account] -= refund;
+        claimed[account] += refund;
+        lastAvailableQuota[account] = availableQuota - refund;
+        lastClaimTime[account] = block.timestamp;
+        emit TaxRefunded(account, refund);
     }
 
     function calculateAMM(
         address merchant,
         uint256 amount
     ) public view returns (uint256 deltaW, uint256 deltaS) {
-        Merchant storage m = merchants[merchant];
-        uint256 S = _getSurplus(merchant);
-        uint256 Y = S + ((m.deposit * m.virtualDepthRatio) / 10000);
-        uint256 P = amount - (amount / 100);
-        uint256 R = m.K / Y;
-
-        if (R == 0) return (0, P);
-
-        int256 b = int256(R) + int256(Y) - int256(P);
-        uint256 discriminant = uint256(b * b) + (4 * P * Y);
-        uint256 root = FixedPointMathLib.sqrt(discriminant);
-
-        if (b >= 0) {
-            deltaS = (root - uint256(b)) / 2;
-        } else {
-            deltaS = (root + uint256(-b)) / 2;
-        }
-
-        if (deltaS > P) deltaS = P;
-        deltaW = P - deltaS;
+        require(amount > 0, "Invalid amount");
+        TradeCalculation memory calculation;
+        calculation.tradeValue = amount - (amount / 100);
+        _calculateSellerTrade(merchant, calculation);
+        return (calculation.deltaW, calculation.deltaS);
     }
 
-    function registerMerchant(uint256 amount) external {
+    function _calculateSellerTrade(
+        address merchant,
+        TradeCalculation memory calculation
+    ) internal view {
+        Merchant storage m = merchants[merchant];
+        require(m.isActive, "Merchant not active");
+        require(calculation.tradeValue > 0, "Invalid trade value");
+
+        int256 tradeValueInt = _toInt256(calculation.tradeValue);
+        int256 oldSellerBalance = netTradeBalance[merchant];
+        calculation.newSellerBalance = oldSellerBalance + tradeValueInt;
+        uint256 newTax = _accountCurveTax(
+            merchant,
+            _positive(calculation.newSellerBalance)
+        );
+        uint256 collectedTax = sellerPoints[merchant];
+        if (newTax > collectedTax) {
+            calculation.deltaS = newTax - collectedTax;
+        }
+        require(
+            calculation.deltaS <= calculation.tradeValue,
+            "Tax exceeds trade value"
+        );
+        calculation.deltaW = calculation.tradeValue - calculation.deltaS;
+    }
+
+    function _calculateBuyerRefund(
+        address buyer,
+        TradeCalculation memory calculation
+    ) internal view {
+        int256 tradeValueInt = _toInt256(calculation.tradeValue);
+        int256 oldBuyerBalance = netTradeBalance[buyer];
+        calculation.newBuyerBalance = oldBuyerBalance - tradeValueInt;
+        uint256 newTax = _accountCurveTax(
+            buyer,
+            _positive(calculation.newBuyerBalance)
+        );
+        uint256 collectedTax = sellerPoints[buyer];
+        uint256 requestedRefund = collectedTax > newTax
+            ? collectedTax - newTax
+            : 0;
+        calculation.buyerRefund = _capTaxRefund(
+            buyer,
+            requestedRefund
+        );
+        if (calculation.buyerRefund > calculation.tradeValue) {
+            calculation.buyerRefund = calculation.tradeValue;
+        }
+    }
+
+    function registerMerchant(uint256 amount) external nonReentrant {
         require(amount > 0, "Deposit required");
 
         Merchant storage m = merchants[msg.sender];
-        uint256 S = _getSurplus(msg.sender);
-        uint256 W;
+        uint256 oldDeposit = m.deposit;
+        uint256 newDeposit = oldDeposit + amount;
+        uint256 depositCredit = 0;
+        uint256 oldP = _positive(netTradeBalance[msg.sender]);
 
-        if (m.isActive) {
-            _syncMerchantParams(msg.sender);
-            uint256 oldMaxW = (m.deposit * m.leverageFactor) / 100;
-            uint256 oldY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
-            uint256 oldR = m.K / oldY;
-            W = oldMaxW - oldR;
-            m.deposit += amount;
-        } else {
-            m.isActive = true;
-            m.deposit = amount;
-            m.leverageFactor = leverageFactor;
-            m.virtualDepthRatio = virtualDepthRatio;
+        if (oldP > 0 && oldDeposit > 0) {
+            uint256 oldTax = _curveTax(oldP, oldDeposit);
+            uint256 newTax = _curveTax(oldP, newDeposit);
+            if (oldTax > newTax) {
+                depositCredit = oldTax - newTax;
+                uint256 collectedTax = sellerPoints[msg.sender];
+                if (depositCredit > collectedTax) {
+                    depositCredit = collectedTax;
+                }
+                if (depositCredit > amount) depositCredit = amount;
+            }
         }
 
-        uint256 newMaxW = (m.deposit * m.leverageFactor) / 100;
-        uint256 newY = S + ((m.deposit * m.virtualDepthRatio) / 10000);
-        uint256 newR = W >= newMaxW ? 0 : newMaxW - W;
-        m.K = newR * newY;
+        settlementAsset.pull(msg.sender, amount - depositCredit);
 
-        settlementAsset.pull(msg.sender, amount);
-        emit MerchantRegistered(msg.sender, m.deposit, W);
+        if (depositCredit > 0) {
+            sellerPoints[msg.sender] -= depositCredit;
+        }
+
+        if (!m.isActive) {
+            m.isActive = true;
+        }
+        m.deposit = newDeposit;
+        emit MerchantRegistered(msg.sender, m.deposit);
     }
 
     function trade(
@@ -193,65 +297,61 @@ contract Market is
         uint256 amount,
         bytes calldata data
     ) external nonReentrant notFromExecutor {
-        Merchant storage m = merchants[merchant];
-        require(m.isActive, "Merchant not active");
+        require(buyer != merchant, "Self trade not allowed");
+        require(amount > 0, "Invalid amount");
 
-        _syncMerchantParams(merchant);
+        TradeCalculation memory calculation;
+        calculation.vaultFee = amount / 100;
+        calculation.tradeValue = amount - calculation.vaultFee;
+        _calculateSellerTrade(merchant, calculation);
+        _calculateBuyerRefund(buyer, calculation);
+        if (msg.sender != buyer) {
+            calculation.buyerRefund = 0;
+        }
 
-        (uint256 deltaW, uint256 deltaS) = calculateAMM(merchant, amount);
+        netTradeBalance[merchant] = calculation.newSellerBalance;
+        netTradeBalance[buyer] = calculation.newBuyerBalance;
 
-        uint256 vaultFee = amount / 100;
-        uint256 netAmount = amount - vaultFee;
-        settlementAsset.pull(msg.sender, amount);
-        settlementAsset.push(vault, vaultFee);
+        if (calculation.buyerRefund > 0) {
+            calculation.buyerRefund = _applyTaxRefund(
+                buyer,
+                calculation.buyerRefund
+            );
+        }
 
-        buyerPoints[buyer] += deltaS;
-        sellerPoints[merchant] += deltaS;
+        settlementAsset.pull(msg.sender, amount - calculation.buyerRefund);
+        settlementAsset.push(vault, calculation.vaultFee);
 
-        buyerRights.mint(buyer, vaultFee);
-        sellerRights.mint(merchant, vaultFee);
+        sellerPoints[merchant] += calculation.deltaS;
+
+        buyerRights.mint(buyer, calculation.vaultFee);
+        sellerRights.mint(merchant, calculation.vaultFee);
+
         ITradeExecutor(executor).executeTrade(
             merchant,
             rechargeTarget,
-            netAmount,
-            deltaW,
+            calculation.tradeValue,
+            calculation.deltaW,
             data
         );
 
-        emit Traded(msg.sender, buyer, merchant, amount, deltaW, deltaS);
+        emit TradeBalanceUpdated(merchant, calculation.newSellerBalance);
+        emit TradeBalanceUpdated(buyer, calculation.newBuyerBalance);
+        emit Traded(
+            msg.sender,
+            buyer,
+            merchant,
+            amount,
+            calculation.deltaW,
+            calculation.deltaS
+        );
     }
 
-    function claimTaxRefund(address account) external nonReentrant {
-        (uint256 actualClaim, uint256 newAvailableQuota) = claimable(account);
-        lastAvailableQuota[account] = newAvailableQuota;
-        lastClaimTime[account] = block.timestamp;
-        buyerPoints[account] -= actualClaim;
-        sellerPoints[account] -= actualClaim;
-        claimed[account] += actualClaim;
-        settlementAsset.push(account, actualClaim);
-        emit TaxRefunded(account, actualClaim);
-    }
-
-    function claimable(
-        address account
-    ) public view returns (uint256 actualClaim, uint256 newAvailableQuota) {
-        uint256 bP = buyerPoints[account];
-        uint256 sP = sellerPoints[account];
-        uint256 totalRefundable = bP < sP ? bP : sP;
-        require(totalRefundable > 0, "No refundable points");
-        uint256 availableQuota = getAvailableQuota(account);
-        require(availableQuota > 0, "Quota exhausted");
-        actualClaim = totalRefundable > availableQuota
-            ? availableQuota
-            : totalRefundable;
-        newAvailableQuota = availableQuota - actualClaim;
-        return (actualClaim, newAvailableQuota);
-    }
 
     function getAvailableQuota(address account) public view returns (uint256) {
         uint256 deposit = merchants[account].deposit;
         if (deposit == 0) return 0;
-        uint256 maxQuota = (deposit * quotaRatio) / 10000;
+        uint256 maxQuota = (deposit * quotaRatio) / BPS;
         if (lastClaimTime[account] == 0) return maxQuota;
         uint256 timePassed = block.timestamp - lastClaimTime[account];
         if (timePassed >= QUOTA_PERIOD) return maxQuota;
@@ -265,16 +365,14 @@ contract Market is
         Merchant storage m = merchants[merchant];
         require(m.isActive, "Merchant not active");
         uint256 slashedAmount = m.deposit;
-        if (buyerPoints[merchant] > 0) {
-            buyerPoints[vault] += buyerPoints[merchant];
-            buyerPoints[merchant] = 0;
-        }
         if (sellerPoints[merchant] > 0) {
             sellerPoints[vault] += sellerPoints[merchant];
             sellerPoints[merchant] = 0;
         }
         delete merchants[merchant];
+        delete netTradeBalance[merchant];
         settlementAsset.push(vault, slashedAmount);
+        emit TradeBalanceUpdated(merchant, 0);
         emit MerchantKicked(merchant, slashedAmount);
     }
 
@@ -291,12 +389,19 @@ contract Market is
     }
 
     function setGlobalAMMParams(
-        uint256 _leverage,
-        uint256 _depthRatio
+        uint256 _baseTaxRate,
+        uint256 _capacityMultiplier,
+        uint256 _curveExponent
     ) external onlyOwner {
-        require(_leverage > 0, "Invalid leverage");
-        require(_depthRatio > 0, "Invalid depth ratio");
-        leverageFactor = _leverage;
-        virtualDepthRatio = _depthRatio;
+        require(_baseTaxRate <= BPS, "Invalid base tax rate");
+        require(_capacityMultiplier > 0, "Invalid capacity multiplier");
+        require(_curveExponent > 0, "Invalid curve exponent");
+        require(
+            _curveExponent <= MAX_CURVE_EXPONENT,
+            "Curve exponent too high"
+        );
+        baseTaxRate = _baseTaxRate;
+        capacityMultiplier = _capacityMultiplier;
+        curveExponent = _curveExponent;
     }
 }

@@ -174,14 +174,12 @@
 //     }
 
 //     function _logStatus(address account) internal view {
-//         uint256 bP = market.buyerPoints(account);
 //         uint256 sP = market.sellerPoints(account);
 //         uint256 bVotes = buyerElection.getVotes(account);
 //         uint256 sVotes = sellerElection.getVotes(account);
 
 //         console.log("=== Status ===");
 //         console.log("Account:", account);
-//         console.log("Buyer Points:", bP);
 //         console.log("Seller Points:", sP);
 //         console.log("Buyer Votes (Normalized):", bVotes / 1e18);
 //         console.log("Seller Votes (Normalized):", sVotes / 1e18);
