@@ -180,8 +180,8 @@ abstract contract GovernorDualConsensusLogic is
     function _voteSucceeded(
         uint256 proposalId
     ) internal view virtual override returns (bool) {
-        (, uint256 f, uint256 a) = proposalVotes(proposalId);
-        return f > a;
+        (uint256 againstVotes, uint256 forVotes, ) = proposalVotes(proposalId);
+        return forVotes > 0 && againstVotes <= forVotes / 2;
     }
 
     function _quorumReached(
