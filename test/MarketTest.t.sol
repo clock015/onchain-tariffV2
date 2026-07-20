@@ -238,7 +238,8 @@ contract MarketTest is Test {
         uint256 vaultFee = tradeAmount / 100;
         uint256 tradeValue = tradeAmount - vaultFee;
         (uint256 merchantDeposit, ) = market.merchants(address(merchantContract));
-        uint256 capacity = merchantDeposit * market.capacityMultiplier();
+        uint256 capacity =
+            (merchantDeposit * market.capacityMultiplier()) / 10000;
         uint256 oldP = 0;
         uint256 newP = tradeValue;
         uint256 oldCurveTax = market.curveTax(oldP, merchantDeposit);
@@ -371,7 +372,7 @@ contract MarketTest is Test {
         );
 
         uint256 newBaseTaxRate = 1800;
-        uint256 newCapacityMultiplier = 5;
+        uint256 newCapacityMultiplier = 51234;
         uint256 newCurveExponent = 2;
         vm.prank(address(timelock));
         market.setGlobalAMMParams(
@@ -728,7 +729,7 @@ contract MarketTest is Test {
 
     /**
      * @notice 测试治理踢出商家逻辑
-     * 验证：1. 只有治理地址能调用；2. 押金被没收至金库；3. 积分被转移至金库；4. 商家所有状态（含 W 和参数快照）清除。
+     * 验证：1. 只有治理地址能调用；2. 押金和未退关税被没收至金库；3. 商家状态清除。
      */
     function testGovernanceKick() public {
         // 1. 准备：Bob 入驻
@@ -771,23 +772,23 @@ contract MarketTest is Test {
         assertFalse(isActive, "Merchant should be inactive");
         assertEq(market.netTradeBalance(bob), 0, "Net balance should be reset");
 
-        // 6. 验证资产没收：押金进入金库 (Vault)
+        // 6. 验证资产没收：押金和未退关税进入金库 (Vault)
         assertEq(
             usdc.balanceOf(vault) - vaultBalBefore,
-            bobDeposit,
-            "Vault should receive bob's deposit"
+            bobDeposit + bobPointsBefore,
+            "Vault should receive deposit and collected tax"
         );
 
-        // 7. 验证积分没收：积分被转移至金库 (Vault)
+        // 7. 验证税款账本清除，不再转成 vault 的 sellerPoints
         assertEq(
             market.sellerPoints(bob),
             0,
             "Bob's seller points should be cleared"
         );
         assertEq(
-            market.sellerPoints(vault) - vaultPointsBefore,
-            bobPointsBefore,
-            "Vault should receive Bob's seller points"
+            market.sellerPoints(vault),
+            vaultPointsBefore,
+            "Vault seller points should remain unchanged"
         );
     }
 }

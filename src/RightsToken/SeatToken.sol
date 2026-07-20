@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC20Votes.sol";
 
 contract SeatToken is ERC20, ERC20Permit, ERC20Votes {
+    error BatchLengthMismatch();
+
     address public minter;
 
     constructor(
@@ -27,6 +29,22 @@ contract SeatToken is ERC20, ERC20Permit, ERC20Votes {
     function burn(address from, uint256 amount) external {
         require(msg.sender == minter, "Only minter");
         _burn(from, amount);
+    }
+
+    function batchBurn(
+        address[] calldata from,
+        uint256[] calldata amounts
+    ) external {
+        require(msg.sender == minter, "Only minter");
+        uint256 length = from.length;
+        if (length != amounts.length) revert BatchLengthMismatch();
+
+        for (uint256 i; i < length; ) {
+            _burn(from[i], amounts[i]);
+            unchecked {
+                ++i;
+            }
+        }
     }
 
     // 新增：由核心合约调用的同步委派

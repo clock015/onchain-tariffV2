@@ -150,6 +150,35 @@ contract ProportionalElection is
         emit SeatBurned(endId, from, amount);
     }
 
+    /**
+     * @notice 批量销毁多个地址在“最新活跃轮次”中的席位代币
+     * @dev 整批操作具有原子性；任意一笔销毁失败都会回滚全部操作
+     * @param from 被处罚的地址列表
+     * @param amounts 各地址对应的销毁数量
+     */
+    function batchBurn(
+        address[] calldata from,
+        uint256[] calldata amounts
+    ) external onlyOwner {
+        (, uint256 endId) = getActiveRange(block.timestamp);
+        address token = rounds[endId].seatToken;
+
+        require(
+            token != address(0),
+            "ProportionalElection: no active round token to burn"
+        );
+
+        ISeatToken(token).batchBurn(from, amounts);
+
+        uint256 length = from.length;
+        for (uint256 i; i < length; ) {
+            emit SeatBurned(endId, from[i], amounts[i]);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
     function _initializeRound(uint256 rId) internal {
         address newToken = seatFactory.createSeatToken(
             string(abi.encodePacked("Council Seat ", _uintToString(rId))),

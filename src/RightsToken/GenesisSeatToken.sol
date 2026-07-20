@@ -41,10 +41,6 @@ contract GenesisSeatToken is ERC20, ERC20Permit, ERC20Votes {
         }
     }
 
-    function burn(address from, uint256 amount) external onlyMinter {
-        _burn(from, amount);
-    }
-
     function forceDelegate(address delegator, address delegatee) external onlyMinter {
         _delegate(delegator, delegatee);
     }

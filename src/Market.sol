@@ -100,7 +100,7 @@ contract Market is
         QUOTA_PERIOD = 30 days;
         quotaRatio = 5000;
         baseTaxRate = 900;
-        capacityMultiplier = 5;
+        capacityMultiplier = 50000;
         curveExponent = 2;
     }
 
@@ -135,7 +135,11 @@ contract Market is
         if (P == 0) return 0;
         require(deposit > 0, "Deposit required");
 
-        uint256 capacity = deposit * capacityMultiplier;
+        uint256 capacity = FixedPointMathLib.fullMulDiv(
+            deposit,
+            capacityMultiplier,
+            BPS
+        );
         require(capacity > 0, "Invalid capacity");
         require(P <= capacity, "Capacity exceeded");
 
@@ -364,11 +368,8 @@ contract Market is
         require(msg.sender == governance, "Only governance");
         Merchant storage m = merchants[merchant];
         require(m.isActive, "Merchant not active");
-        uint256 slashedAmount = m.deposit;
-        if (sellerPoints[merchant] > 0) {
-            sellerPoints[vault] += sellerPoints[merchant];
-            sellerPoints[merchant] = 0;
-        }
+        uint256 slashedAmount = m.deposit + sellerPoints[merchant];
+        sellerPoints[merchant] = 0;
         delete merchants[merchant];
         delete netTradeBalance[merchant];
         settlementAsset.push(vault, slashedAmount);
