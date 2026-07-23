@@ -76,6 +76,14 @@ contract Market is
         uint256 W,
         uint256 deltaS
     );
+    event TradeBalanceChanged(
+        address indexed buyer,
+        address indexed merchant,
+        int256 oldBuyerBalance,
+        int256 newBuyerBalance,
+        int256 oldMerchantBalance,
+        int256 newMerchantBalance
+    );
     event TradeBalanceUpdated(address indexed account, int256 netTradeBalance);
     event TaxRefunded(address indexed account, uint256 amount);
     event MerchantKicked(address indexed merchant, uint256 slashedAmount);
@@ -341,6 +349,15 @@ contract Market is
 
         emit TradeBalanceUpdated(merchant, calculation.newSellerBalance);
         emit TradeBalanceUpdated(buyer, calculation.newBuyerBalance);
+        int256 tradeValue = _toInt256(calculation.tradeValue);
+        emit TradeBalanceChanged(
+            buyer,
+            merchant,
+            calculation.newBuyerBalance + tradeValue,
+            calculation.newBuyerBalance,
+            calculation.newSellerBalance - tradeValue,
+            calculation.newSellerBalance
+        );
         emit Traded(
             msg.sender,
             buyer,
