@@ -5,19 +5,23 @@ interface IMarket {
     struct Merchant {
         uint256 deposit;
         bool isActive;
+        address rightsOwner;
     }
 
     function settlementAsset() external view returns (address);
 
     function merchants(
         address account
-    ) external view returns (uint256 deposit, bool isActive);
+    )
+        external
+        view
+        returns (uint256 deposit, bool isActive, address rightsOwner);
 
     function sellerPoints(address account) external view returns (uint256);
 
     function netTradeBalance(address account) external view returns (int256);
 
-    function registerMerchant(uint256 amount) external;
+    function registerMerchant(uint256 amount, address rightsOwner) external;
 
     function trade(
         address buyer,

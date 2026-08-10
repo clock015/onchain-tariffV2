@@ -9,7 +9,6 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 
 import "../interfaces/IMarket.sol";
 import "../interfaces/IMerchantTradeIn.sol";
-import "../interfaces/IRightsToken.sol";
 
 abstract contract MerchantBase is
     Initializable,
@@ -23,9 +22,7 @@ abstract contract MerchantBase is
         address market;
         IERC20 underlying;
         address settlementAsset;
-        address buyerElection;
-        address sellerElection;
-        address beneficiary;
+        address rightsOwner;
         address tradeExecutor;
         address business;
         uint256 ownerBalance;
@@ -44,10 +41,6 @@ abstract contract MerchantBase is
         }
     }
 
-    event BeneficiaryUpdated(
-        address indexed oldBeneficiary,
-        address indexed newBeneficiary
-    );
     event TradeExecutorUpdated(
         address indexed oldTradeExecutor,
         address indexed newTradeExecutor
@@ -91,22 +84,20 @@ abstract contract MerchantBase is
     function __MerchantBase_init(
         address _market,
         address _underlying,
-        address _buyerElection,
-        address _sellerElection,
+        address _rightsOwner,
         address _tradeExecutor,
         address _business
     ) internal onlyInitializing {
+        require(_rightsOwner != address(0), "Invalid rights owner");
         __Ownable_init(msg.sender);
 
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         $.market = _market;
         $.underlying = IERC20(_underlying);
         $.settlementAsset = IMarket(_market).settlementAsset();
-        $.buyerElection = _buyerElection;
-        $.sellerElection = _sellerElection;
+        $.rightsOwner = _rightsOwner;
         $.tradeExecutor = _tradeExecutor;
         $.business = _business;
-        $.beneficiary = msg.sender;
     }
 
     function _authorizeUpgrade(
@@ -122,8 +113,8 @@ abstract contract MerchantBase is
     function settlementAsset() public view returns (address) {
         return _getMerchantBaseStorage().settlementAsset;
     }
-    function beneficiary() public view returns (address) {
-        return _getMerchantBaseStorage().beneficiary;
+    function rightsOwner() public view returns (address) {
+        return _getMerchantBaseStorage().rightsOwner;
     }
     function tradeExecutor() public view returns (address) {
         return _getMerchantBaseStorage().tradeExecutor;
@@ -133,16 +124,6 @@ abstract contract MerchantBase is
     }
     function ownerBalance() public view returns (uint256) {
         return _getMerchantBaseStorage().ownerBalance;
-    }
-
-    function setBeneficiary(
-        address _newBeneficiary
-    ) external virtual onlyOwner {
-        require(_newBeneficiary != address(0), "Invalid address");
-        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
-        address old = $.beneficiary;
-        $.beneficiary = _newBeneficiary;
-        emit BeneficiaryUpdated(old, _newBeneficiary);
     }
 
     function setTradeExecutor(
@@ -178,7 +159,7 @@ abstract contract MerchantBase is
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         _spendOwnerBalance(amount);
         $.underlying.forceApprove($.settlementAsset, amount);
-        IMarket($.market).registerMerchant(amount);
+        IMarket($.market).registerMerchant(amount, $.rightsOwner);
     }
 
     function tradeOut(
@@ -198,11 +179,16 @@ abstract contract MerchantBase is
     }
 
     function tradeIn(
+        address registeredRightsOwner,
         uint160 rechargeTarget,
         uint256 netAmount,
         uint256 deltaW,
         bytes calldata data
     ) external virtual override onlyTradeExecutor {
+        require(
+            registeredRightsOwner == _getMerchantBaseStorage().rightsOwner,
+            "Unsupported rights owner"
+        );
         _tradeIn(rechargeTarget, netAmount, deltaW, data);
     }
 
@@ -212,13 +198,6 @@ abstract contract MerchantBase is
         uint256 deltaW,
         bytes calldata data
     ) internal virtual;
-
-
-    function delegateVotesToBeneficiary() external virtual onlyOwner {
-        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
-        IRightsToken($.buyerElection).delegate($.beneficiary);
-        IRightsToken($.sellerElection).delegate($.beneficiary);
-    }
 
     function _creditOwnerBalance(uint256 amount) internal {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();

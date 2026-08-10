@@ -30,6 +30,7 @@ contract Market is
     struct Merchant {
         uint256 deposit;
         bool isActive;
+        address rightsOwner;
     }
 
     struct TradeCalculation {
@@ -66,6 +67,7 @@ contract Market is
 
     event MerchantRegistered(
         address indexed merchant,
+        address indexed rightsOwner,
         uint256 deposit
     );
     event Traded(
@@ -267,10 +269,20 @@ contract Market is
         }
     }
 
-    function registerMerchant(uint256 amount) external nonReentrant {
+    function registerMerchant(
+        uint256 amount,
+        address rightsOwner
+    ) external nonReentrant {
         require(amount > 0, "Deposit required");
+        require(rightsOwner != address(0), "Invalid rights owner");
 
         Merchant storage m = merchants[msg.sender];
+        if (m.rightsOwner == address(0)) {
+            m.rightsOwner = rightsOwner;
+        } else {
+            require(m.rightsOwner == rightsOwner, "Rights owner is immutable");
+        }
+
         uint256 oldDeposit = m.deposit;
         uint256 newDeposit = oldDeposit + amount;
         uint256 depositCredit = 0;
@@ -299,7 +311,7 @@ contract Market is
             m.isActive = true;
         }
         m.deposit = newDeposit;
-        emit MerchantRegistered(msg.sender, m.deposit);
+        emit MerchantRegistered(msg.sender, m.rightsOwner, m.deposit);
     }
 
     function trade(
@@ -337,10 +349,12 @@ contract Market is
         sellerPoints[merchant] += calculation.deltaS;
 
         buyerRights.mint(buyer, calculation.vaultFee);
-        sellerRights.mint(merchant, calculation.vaultFee);
+        address rightsOwner = merchants[merchant].rightsOwner;
+        sellerRights.mint(rightsOwner, calculation.vaultFee);
 
         ITradeExecutor(executor).executeTrade(
             merchant,
+            rightsOwner,
             rechargeTarget,
             calculation.tradeValue,
             calculation.deltaW,
@@ -386,9 +400,12 @@ contract Market is
         Merchant storage m = merchants[merchant];
         require(m.isActive, "Merchant not active");
         uint256 slashedAmount = m.deposit + sellerPoints[merchant];
-        sellerPoints[merchant] = 0;
         delete merchants[merchant];
+        delete sellerPoints[merchant];
+        delete claimed[merchant];
         delete netTradeBalance[merchant];
+        delete lastClaimTime[merchant];
+        delete lastAvailableQuota[merchant];
         settlementAsset.push(vault, slashedAmount);
         emit TradeBalanceUpdated(merchant, 0);
         emit MerchantKicked(merchant, slashedAmount);

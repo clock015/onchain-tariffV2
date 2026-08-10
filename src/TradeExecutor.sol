@@ -20,6 +20,7 @@ contract TradeExecutor {
 
     function executeTrade(
         address target,
+        address rightsOwner,
         uint160 rechargeTarget,
         uint256 netAmount,
         uint256 deltaW,
@@ -32,6 +33,7 @@ contract TradeExecutor {
 
         if (target.code.length > 0) {
             IMerchantTradeIn(target).tradeIn(
+                rightsOwner,
                 rechargeTarget,
                 netAmount,
                 deltaW,

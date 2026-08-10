@@ -21,17 +21,29 @@ import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 // --- Mock 业务合约 ---
 contract MockBusiness is IMerchantTradeIn {
+    address public immutable supportedRightsOwner;
+    address public lastRightsOwner;
     uint160 public lastRechargeTarget;
     uint256 public lastAmount;
     uint256 public lastDeltaW;
     bytes32 public lastDataHash;
 
+    constructor(address _supportedRightsOwner) {
+        supportedRightsOwner = _supportedRightsOwner;
+    }
+
     function tradeIn(
+        address rightsOwner,
         uint160 rechargeTarget,
         uint256 netAmount,
         uint256 deltaW,
         bytes calldata data
     ) external override {
+        require(
+            rightsOwner == supportedRightsOwner,
+            "Unsupported rights owner"
+        );
+        lastRightsOwner = rightsOwner;
         lastRechargeTarget = rechargeTarget;
         lastAmount = netAmount;
         lastDeltaW = deltaW;
@@ -66,6 +78,7 @@ contract MarketTest is Test {
     address public alice = address(0x2);
     address public bob = address(0x3);
     address public charlie = address(0x4);
+    address public merchantOwner = address(0x5);
     address public vault = address(0x999);
 
     uint256 public constant INITIAL_BALANCE = 10000e6;
@@ -86,7 +99,7 @@ contract MarketTest is Test {
                 new ERC1967Proxy(address(settlementImpl), settlementInitData)
             )
         );
-        merchantContract = new MockBusiness();
+        merchantContract = new MockBusiness(merchantOwner);
 
         buyerFactory = new SeatTokenFactory();
         sellerFactory = new SeatTokenFactory();
@@ -206,12 +219,13 @@ contract MarketTest is Test {
         vm.startPrank(bob);
         uint256 depositAmount = 1000e6;
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, bob);
 
-        (uint256 deposit, bool isActive) = market.merchants(bob);
+        (uint256 deposit, bool isActive, address rightsOwner) = market.merchants(bob);
 
         assertEq(deposit, depositAmount, "Deposit mismatch");
         assertTrue(isActive, "Merchant should be active");
+        assertEq(rightsOwner, bob, "Rights owner mismatch");
         assertEq(market.netTradeBalance(bob), 0, "Initial net balance mismatch");
 
         vm.stopPrank();
@@ -225,7 +239,7 @@ contract MarketTest is Test {
 
         vm.startPrank(address(merchantContract));
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, merchantOwner);
         vm.stopPrank();
 
         // 2. 预计算 AMM 分配结果
@@ -237,7 +251,12 @@ contract MarketTest is Test {
         );
         uint256 vaultFee = tradeAmount / 100;
         uint256 tradeValue = tradeAmount - vaultFee;
-        (uint256 merchantDeposit, ) = market.merchants(address(merchantContract));
+        (
+            uint256 merchantDeposit,
+            ,
+            address registeredRightsOwner
+        ) = market.merchants(address(merchantContract));
+        assertEq(registeredRightsOwner, merchantOwner);
         uint256 capacity =
             (merchantDeposit * market.capacityMultiplier()) / 10000;
         uint256 oldP = 0;
@@ -318,6 +337,11 @@ contract MarketTest is Test {
 
         // 6. 验证充值回调参数
         assertEq(
+            merchantContract.lastRightsOwner(),
+            merchantOwner,
+            "Rights owner callback mismatch"
+        );
+        assertEq(
             merchantContract.lastRechargeTarget(),
             rechargeTarget,
             "Recharge target mismatch"
@@ -351,8 +375,13 @@ contract MarketTest is Test {
         vm.warp(block.timestamp + 31 days);
         assertEq(buyerElection.getVotes(alice), 100 * 1e18);
         assertEq(
-            sellerElection.getVotes(address(merchantContract)),
+            sellerElection.getVotes(merchantOwner),
             100 * 1e18
+        );
+        assertEq(
+            sellerElection.getVotes(address(merchantContract)),
+            0,
+            "Merchant should not own seller rights"
         );
     }
 
@@ -363,7 +392,7 @@ contract MarketTest is Test {
 
         vm.startPrank(bob);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, bob);
         vm.stopPrank();
 
         (uint256 oldExpectedW, uint256 oldExpectedS) = market.calculateAMM(
@@ -399,7 +428,7 @@ contract MarketTest is Test {
 
         vm.startPrank(charlie);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, charlie);
         vm.stopPrank();
 
         (uint256 newExpectedW, uint256 newExpectedS) = market.calculateAMM(
@@ -439,12 +468,12 @@ contract MarketTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, bob);
         vm.stopPrank();
 
         vm.startPrank(bob);
@@ -497,7 +526,7 @@ contract MarketTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(address(settlementAsset), initialDeposit);
-        market.registerMerchant(initialDeposit);
+        market.registerMerchant(initialDeposit, alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
@@ -523,7 +552,7 @@ contract MarketTest is Test {
         uint256 balanceBefore = usdc.balanceOf(alice);
         vm.startPrank(alice);
         usdc.approve(address(settlementAsset), additionalDeposit);
-        market.registerMerchant(additionalDeposit);
+        market.registerMerchant(additionalDeposit, alice);
         vm.stopPrank();
 
         assertEq(
@@ -556,12 +585,12 @@ contract MarketTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, bob);
         vm.stopPrank();
 
         vm.startPrank(bob);
@@ -605,12 +634,12 @@ contract MarketTest is Test {
 
         vm.startPrank(alice);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount);
+        market.registerMerchant(depositAmount, bob);
         usdc.approve(address(settlementAsset), firstTradeAmount);
         market.trade(bob, alice, uint160(bob), firstTradeAmount, "");
         vm.stopPrank();
@@ -712,8 +741,8 @@ contract MarketTest is Test {
         // 断言：由于卖方没投票，min(100, 0) = 0。有效赞成票应为 0。
         assertEq(forVotes, 0, "Consensus should be 0 when only buyer voted");
 
-        // 5. 情况 B：卖方 (Bob) 也投赞成票
-        vm.prank(address(merchantContract));
+        // 5. 情况 B：商家登记的权利 owner 也投赞成票
+        vm.prank(merchantOwner);
         governor.castVote(proposalId, 1);
 
         (, forVotes, ) = governor.proposalVotes(proposalId);
@@ -736,7 +765,13 @@ contract MarketTest is Test {
         vm.startPrank(bob);
         uint256 bobDeposit = 1000e6;
         usdc.approve(address(settlementAsset), bobDeposit);
-        market.registerMerchant(bobDeposit);
+        market.registerMerchant(bobDeposit, bob);
+        vm.stopPrank();
+
+        vm.startPrank(charlie);
+        uint256 charlieDeposit = 1000e6;
+        usdc.approve(address(settlementAsset), charlieDeposit);
+        market.registerMerchant(charlieDeposit, charlie);
         vm.stopPrank();
 
         // 2. 产生业务数据：Alice 买 Bob 的东西
@@ -746,14 +781,29 @@ contract MarketTest is Test {
         market.trade(alice, bob, uint160(alice), 100e6, "");
         vm.stopPrank();
 
+        // Bob 再作为买家消费一部分，产生非零的退款和额度状态
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), 50e6);
+        market.trade(bob, charlie, uint160(bob), 50e6, "");
+        vm.stopPrank();
+
         // 记录没收前状态
         int256 netBalanceBefore = market.netTradeBalance(bob);
         uint256 bobPointsBefore = market.sellerPoints(bob);
+        uint256 claimedBefore = market.claimed(bob);
+        uint256 lastClaimTimeBefore = market.lastClaimTime(bob);
+        uint256 lastAvailableQuotaBefore = market.lastAvailableQuota(bob);
         uint256 vaultPointsBefore = market.sellerPoints(vault);
         uint256 vaultBalBefore = usdc.balanceOf(vault);
 
         assertTrue(bobPointsBefore > 0, "Bob should have points before kick");
         assertTrue(netBalanceBefore > 0, "Bob should have net balance before kick");
+        assertTrue(claimedBefore > 0, "Bob should have claimed tax before kick");
+        assertTrue(lastClaimTimeBefore > 0, "Bob should have a claim time before kick");
+        assertTrue(
+            lastAvailableQuotaBefore > 0,
+            "Bob should have quota state before kick"
+        );
 
         // 3. 权限校验：普通人无法踢出商家
         vm.startPrank(alice);
@@ -765,11 +815,12 @@ contract MarketTest is Test {
         vm.prank(address(timelock));
         market.kickMerchant(bob);
 
-        // 5. 验证商家结构体被彻底清除 (delete merchants[merchant])
-        (uint256 deposit, bool isActive) = market.merchants(bob);
+        // 5. 商家身份和全部经济状态被彻底清除
+        (uint256 deposit, bool isActive, address rightsOwner) = market.merchants(bob);
 
         assertEq(deposit, 0, "Deposit should be cleared");
         assertFalse(isActive, "Merchant should be inactive");
+        assertEq(rightsOwner, address(0), "Rights owner should be cleared");
         assertEq(market.netTradeBalance(bob), 0, "Net balance should be reset");
 
         // 6. 验证资产没收：押金和未退关税进入金库 (Vault)
@@ -790,5 +841,84 @@ contract MarketTest is Test {
             vaultPointsBefore,
             "Vault seller points should remain unchanged"
         );
+        assertEq(market.claimed(bob), 0, "Claim history should be cleared");
+        assertEq(market.lastClaimTime(bob), 0, "Claim time should be cleared");
+        assertEq(
+            market.lastAvailableQuota(bob),
+            0,
+            "Available quota state should be cleared"
+        );
+
+        // 8. 同一地址再次注册是一个新 merchant，可以选择新的 owner
+        uint256 newDeposit = 100e6;
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), newDeposit);
+        market.registerMerchant(newDeposit, charlie);
+        vm.stopPrank();
+
+        (deposit, isActive, rightsOwner) = market.merchants(bob);
+        assertEq(deposit, newDeposit);
+        assertTrue(isActive);
+        assertEq(rightsOwner, charlie);
+    }
+
+    function testRightsOwnerCannotChangeAfterFirstRegistration() public {
+        uint256 initialDeposit = 1000e6;
+        uint256 additionalDeposit = 100e6;
+
+        vm.startPrank(bob);
+        usdc.approve(
+            address(settlementAsset),
+            initialDeposit + additionalDeposit
+        );
+        market.registerMerchant(initialDeposit, merchantOwner);
+        market.registerMerchant(additionalDeposit, merchantOwner);
+
+        vm.expectRevert("Rights owner is immutable");
+        market.registerMerchant(1, charlie);
+        vm.stopPrank();
+
+        (
+            uint256 deposit,
+            bool isActive,
+            address registeredRightsOwner
+        ) = market.merchants(bob);
+        assertEq(deposit, initialDeposit + additionalDeposit);
+        assertTrue(isActive);
+        assertEq(registeredRightsOwner, merchantOwner);
+    }
+
+    function testFirstRegistrationRejectsZeroRightsOwner() public {
+        vm.prank(bob);
+        vm.expectRevert("Invalid rights owner");
+        market.registerMerchant(1000e6, address(0));
+    }
+
+    function testMerchantCanRejectRegisteredRightsOwnerOnTrade() public {
+        uint256 depositAmount = 1000e6;
+        uint256 tradeAmount = 100e6;
+
+        usdc.mint(address(merchantContract), depositAmount);
+        vm.startPrank(address(merchantContract));
+        usdc.approve(address(settlementAsset), depositAmount);
+        market.registerMerchant(depositAmount, charlie);
+        vm.stopPrank();
+
+        uint256 aliceBalanceBefore = usdc.balanceOf(alice);
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), tradeAmount);
+        vm.expectRevert("Unsupported rights owner");
+        market.trade(
+            alice,
+            address(merchantContract),
+            uint160(alice),
+            tradeAmount,
+            ""
+        );
+        vm.stopPrank();
+
+        assertEq(usdc.balanceOf(alice), aliceBalanceBefore);
+        assertEq(market.netTradeBalance(address(merchantContract)), 0);
+        assertEq(market.sellerPoints(address(merchantContract)), 0);
     }
 }

@@ -244,6 +244,7 @@ contract MarketOld is
 
         ITradeExecutor(executor).executeTrade(
             merchant,
+            merchant,
             rechargeTarget,
             tradeValue,
             deltaW,
