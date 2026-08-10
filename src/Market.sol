@@ -108,7 +108,7 @@ contract Market is
         QUOTA_PERIOD = 30 days;
         quotaRatio = 5000;
         baseTaxRate = 900;
-        capacityMultiplier = 50000;
+        capacityMultiplier = 40000;
         curveExponent = 2;
     }
 
