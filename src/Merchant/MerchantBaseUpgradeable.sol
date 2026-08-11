@@ -10,12 +10,7 @@ import "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import "../interfaces/IMarket.sol";
 import "../interfaces/IMerchantTradeIn.sol";
 
-abstract contract MerchantBase is
-    Initializable,
-    OwnableUpgradeable,
-    UUPSUpgradeable,
-    IMerchantTradeIn
-{
+abstract contract MerchantBase is Initializable, OwnableUpgradeable, UUPSUpgradeable, IMerchantTradeIn {
     using SafeERC20 for IERC20;
 
     struct MerchantBaseStorage {
@@ -31,49 +26,30 @@ abstract contract MerchantBase is
     bytes32 private constant MerchantBaseStorageLocation =
         0x56a421008746973f1d5e3f43501a37c9508c90333d0e376044791307b2298600;
 
-    function _getMerchantBaseStorage()
-        private
-        pure
-        returns (MerchantBaseStorage storage $)
-    {
+    function _getMerchantBaseStorage() private pure returns (MerchantBaseStorage storage $) {
         assembly {
             $.slot := MerchantBaseStorageLocation
         }
     }
 
-    event TradeExecutorUpdated(
-        address indexed oldTradeExecutor,
-        address indexed newTradeExecutor
-    );
-    event BusinessUpdated(
-        address indexed oldBusiness,
-        address indexed newBusiness
-    );
+    event TradeExecutorUpdated(address indexed oldTradeExecutor, address indexed newTradeExecutor);
+    event BusinessUpdated(address indexed oldBusiness, address indexed newBusiness);
     event OwnerBalanceCredited(uint256 amount, uint256 newBalance);
     event OwnerBalanceSpent(uint256 amount, uint256 newBalance);
 
     modifier onlyTradeExecutor() {
-        require(
-            msg.sender == _getMerchantBaseStorage().tradeExecutor,
-            "Only trade executor"
-        );
+        require(msg.sender == _getMerchantBaseStorage().tradeExecutor, "Only trade executor");
         _;
     }
 
     modifier onlyBusiness() {
-        require(
-            msg.sender == _getMerchantBaseStorage().business,
-            "Only business"
-        );
+        require(msg.sender == _getMerchantBaseStorage().business, "Only business");
         _;
     }
 
     modifier onlyOwnerOrBusiness() {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
-        require(
-            msg.sender == owner() || msg.sender == $.business,
-            "Only owner or business"
-        );
+        require(msg.sender == owner() || msg.sender == $.business, "Only owner or business");
         _;
     }
 
@@ -100,35 +76,37 @@ abstract contract MerchantBase is
         $.business = _business;
     }
 
-    function _authorizeUpgrade(
-        address newImplementation
-    ) internal override onlyOwner {}
+    function _authorizeUpgrade(address newImplementation) internal override onlyOwner {}
 
     function market() public view returns (address) {
         return _getMerchantBaseStorage().market;
     }
+
     function underlying() public view returns (IERC20) {
         return _getMerchantBaseStorage().underlying;
     }
+
     function settlementAsset() public view returns (address) {
         return _getMerchantBaseStorage().settlementAsset;
     }
+
     function rightsOwner() public view returns (address) {
         return _getMerchantBaseStorage().rightsOwner;
     }
+
     function tradeExecutor() public view returns (address) {
         return _getMerchantBaseStorage().tradeExecutor;
     }
+
     function business() public view returns (address) {
         return _getMerchantBaseStorage().business;
     }
+
     function ownerBalance() public view returns (uint256) {
         return _getMerchantBaseStorage().ownerBalance;
     }
 
-    function setTradeExecutor(
-        address _newTradeExecutor
-    ) external virtual onlyOwner {
+    function setTradeExecutor(address _newTradeExecutor) external virtual onlyOwner {
         require(_newTradeExecutor != address(0), "Invalid address");
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();
         address old = $.tradeExecutor;
@@ -155,16 +133,10 @@ abstract contract MerchantBase is
         _creditOwnerBalance(amount);
     }
 
-    function register(uint256 amount) external virtual onlyOwner {
-        MerchantBaseStorage storage $ = _getMerchantBaseStorage();
-        _spendOwnerBalance(amount);
-        $.underlying.forceApprove($.settlementAsset, amount);
-        IMarket($.market).registerMerchant(amount, $.rightsOwner);
-    }
-
     function tradeOut(
         address buyer,
-        address merchant,
+        uint256 buyerAccountId,
+        uint256 sellerAccountId,
         uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
@@ -175,7 +147,7 @@ abstract contract MerchantBase is
         }
 
         $.underlying.forceApprove($.settlementAsset, amount);
-        IMarket($.market).trade(buyer, merchant, rechargeTarget, amount, data);
+        IMarket($.market).trade(buyer, buyerAccountId, sellerAccountId, rechargeTarget, amount, data);
     }
 
     function tradeIn(
@@ -185,19 +157,11 @@ abstract contract MerchantBase is
         uint256 deltaW,
         bytes calldata data
     ) external virtual override onlyTradeExecutor {
-        require(
-            registeredRightsOwner == _getMerchantBaseStorage().rightsOwner,
-            "Unsupported rights owner"
-        );
+        require(registeredRightsOwner == _getMerchantBaseStorage().rightsOwner, "Unsupported rights owner");
         _tradeIn(rechargeTarget, netAmount, deltaW, data);
     }
 
-    function _tradeIn(
-        uint160 rechargeTarget,
-        uint256 netAmount,
-        uint256 deltaW,
-        bytes calldata data
-    ) internal virtual;
+    function _tradeIn(uint160 rechargeTarget, uint256 netAmount, uint256 deltaW, bytes calldata data) internal virtual;
 
     function _creditOwnerBalance(uint256 amount) internal {
         MerchantBaseStorage storage $ = _getMerchantBaseStorage();

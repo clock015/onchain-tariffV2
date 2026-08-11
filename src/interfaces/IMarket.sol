@@ -2,34 +2,43 @@
 pragma solidity ^0.8.20;
 
 interface IMarket {
-    struct Merchant {
+    struct MarketAccount {
+        address owner;
+        address merchant;
         uint256 deposit;
+        uint256 capacityMultiplier;
         bool isActive;
-        address rightsOwner;
     }
 
     function settlementAsset() external view returns (address);
 
-    function merchants(
-        address account
-    )
+    function accounts(uint256 accountId)
         external
         view
-        returns (uint256 deposit, bool isActive, address rightsOwner);
+        returns (address owner, address merchant, uint256 deposit, uint256 capacityMultiplier, bool isActive);
 
-    function sellerPoints(address account) external view returns (uint256);
+    function accountIdOf(address owner, address merchant) external view returns (uint256);
 
-    function netTradeBalance(address account) external view returns (int256);
+    function sellerPoints(uint256 accountId) external view returns (uint256);
 
-    function registerMerchant(uint256 amount, address rightsOwner) external;
+    function netTradeBalance(uint256 accountId) external view returns (int256);
+
+    function registerMerchant(address merchant, uint256 amount, uint256 capacityMultiplier)
+        external
+        returns (uint256 accountId);
+
+    function addDeposit(uint256 accountId, uint256 amount) external;
+
+    function setCapacityMultiplier(uint256 accountId, uint256 newMultiplier) external;
 
     function trade(
         address buyer,
-        address merchant,
+        uint256 buyerAccountId,
+        uint256 sellerAccountId,
         uint160 rechargeTarget,
         uint256 amount,
         bytes calldata data
     ) external;
 
-    function kickMerchant(address merchant) external;
+    function kickMerchant(uint256 accountId) external;
 }

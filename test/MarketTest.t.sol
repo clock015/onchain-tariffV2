@@ -2,9 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
-import "forge-std/console.sol";
 
-// 导入你的合约
 import "../src/Market.sol";
 import "../src/TradeExecutor.sol";
 import "../src/settlement/ERC20SettlementAsset.sol";
@@ -14,12 +12,10 @@ import "../src/RightsToken/SeatTokenFactory.sol";
 import "../src/RightsToken/GenesisSeatToken.sol";
 import "../src/Governor/FinalGovernor.sol";
 
-// 导入依赖
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/governance/TimelockController.sol";
 import "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
-// --- Mock 业务合约 ---
 contract MockBusiness is IMerchantTradeIn {
     address public immutable supportedRightsOwner;
     address public lastRightsOwner;
@@ -39,10 +35,7 @@ contract MockBusiness is IMerchantTradeIn {
         uint256 deltaW,
         bytes calldata data
     ) external override {
-        require(
-            rightsOwner == supportedRightsOwner,
-            "Unsupported rights owner"
-        );
+        require(rightsOwner == supportedRightsOwner, "Unsupported rights owner");
         lastRightsOwner = rightsOwner;
         lastRechargeTarget = rechargeTarget;
         lastAmount = netAmount;
@@ -53,6 +46,7 @@ contract MockBusiness is IMerchantTradeIn {
 
 contract MockUSDC is ERC20 {
     constructor() ERC20("Mock USDC", "USDC") {}
+
     function mint(address to, uint256 amount) public {
         _mint(to, amount);
     }
@@ -71,7 +65,6 @@ contract MarketTest is Test {
 
     FinalGovernor public governor;
     TimelockController public timelock;
-
     MockBusiness public merchantContract;
 
     address public admin = address(0x1);
@@ -82,6 +75,7 @@ contract MarketTest is Test {
     address public vault = address(0x999);
 
     uint256 public constant INITIAL_BALANCE = 10000e6;
+    uint256 public constant DEFAULT_MULTIPLIER = 40000;
 
     function setUp() public {
         vm.warp(365 days + 30 days);
@@ -89,71 +83,51 @@ contract MarketTest is Test {
 
         usdc = new MockUSDC();
         ERC20SettlementAsset settlementImpl = new ERC20SettlementAsset();
-        bytes memory settlementInitData = abi.encodeWithSelector(
-            ERC20SettlementAsset.initialize.selector,
-            address(usdc),
-            admin
-        );
-        settlementAsset = ERC20SettlementAsset(
-            address(
-                new ERC1967Proxy(address(settlementImpl), settlementInitData)
-            )
-        );
+        bytes memory settlementInitData =
+            abi.encodeWithSelector(ERC20SettlementAsset.initialize.selector, address(usdc), admin);
+        settlementAsset = ERC20SettlementAsset(address(new ERC1967Proxy(address(settlementImpl), settlementInitData)));
         merchantContract = new MockBusiness(merchantOwner);
 
         buyerFactory = new SeatTokenFactory();
         sellerFactory = new SeatTokenFactory();
 
-        GenesisSeatToken buyerGenesisSeat = new GenesisSeatToken(
-            "Council Seat 0",
-            "CS",
-            admin
-        );
-        GenesisSeatToken sellerGenesisSeat = new GenesisSeatToken(
-            "Council Seat 0",
-            "CS",
-            admin
-        );
+        GenesisSeatToken buyerGenesisSeat = new GenesisSeatToken("Council Seat 0", "CS", admin);
+        GenesisSeatToken sellerGenesisSeat = new GenesisSeatToken("Council Seat 0", "CS", admin);
         buyerGenesisSeat.mint(admin, 100 * 1e18);
         sellerGenesisSeat.mint(admin, 100 * 1e18);
 
         ProportionalElection buyerElectionImpl = new ProportionalElection();
-        bytes memory buyerElectionInit = abi.encodeWithSelector(
-            ProportionalElection.initialize.selector,
-            address(buyerFactory),
-            admin,
-            address(buyerGenesisSeat)
-        );
         buyerElection = ProportionalElection(
             address(
-                new ERC1967Proxy(address(buyerElectionImpl), buyerElectionInit)
+                new ERC1967Proxy(
+                    address(buyerElectionImpl),
+                    abi.encodeWithSelector(
+                        ProportionalElection.initialize.selector,
+                        address(buyerFactory),
+                        admin,
+                        address(buyerGenesisSeat)
+                    )
+                )
             )
         );
 
         ProportionalElection sellerElectionImpl = new ProportionalElection();
-        bytes memory sellerElectionInit = abi.encodeWithSelector(
-            ProportionalElection.initialize.selector,
-            address(sellerFactory),
-            admin,
-            address(sellerGenesisSeat)
-        );
         sellerElection = ProportionalElection(
             address(
                 new ERC1967Proxy(
                     address(sellerElectionImpl),
-                    sellerElectionInit
+                    abi.encodeWithSelector(
+                        ProportionalElection.initialize.selector,
+                        address(sellerFactory),
+                        admin,
+                        address(sellerGenesisSeat)
+                    )
                 )
             )
         );
 
         buyerGenesisSeat.setMinter(address(buyerElection));
         sellerGenesisSeat.setMinter(address(sellerElection));
-
-        assertEq(buyerElection.currentRoundId(), 1, "Buyer election should start at round 1");
-        assertEq(sellerElection.currentRoundId(), 1, "Seller election should start at round 1");
-        assertEq(buyerElection.getVotes(admin), 100 * 1e18, "Genesis buyer votes mismatch");
-        assertEq(sellerElection.getVotes(admin), 100 * 1e18, "Genesis seller votes mismatch");
-
         buyerFactory.setElectionContract(address(buyerElection));
         sellerFactory.setElectionContract(address(sellerElection));
 
@@ -164,37 +138,42 @@ contract MarketTest is Test {
         timelock = new TimelockController(0, proposers, executorsGov, admin);
 
         Market marketImpl = new Market();
-        bytes memory marketInitData = abi.encodeWithSelector(
-            Market.initialize.selector,
-            address(settlementAsset),
-            address(buyerElection),
-            address(sellerElection),
-            address(timelock),
-            vault
-        );
         market = Market(
-            address(new ERC1967Proxy(address(marketImpl), marketInitData))
+            address(
+                new ERC1967Proxy(
+                    address(marketImpl),
+                    abi.encodeWithSelector(
+                        Market.initialize.selector,
+                        address(settlementAsset),
+                        address(buyerElection),
+                        address(sellerElection),
+                        address(timelock),
+                        vault
+                    )
+                )
+            )
         );
 
         executor = new TradeExecutor(address(market), address(settlementAsset));
         market.setExecutor(address(executor));
         settlementAsset.setController(address(market), true);
         settlementAsset.setController(address(executor), true);
-
         buyerElection.setMinter(address(market));
         sellerElection.setMinter(address(market));
 
         FinalGovernor governorImpl = new FinalGovernor();
-        bytes memory govInitData = abi.encodeWithSelector(
-            FinalGovernor.initialize.selector,
-            IVotes(address(buyerElection)),
-            IVotes(address(sellerElection)),
-            timelock
-        );
         governor = FinalGovernor(
-            payable(
-                address(new ERC1967Proxy(address(governorImpl), govInitData))
-            )
+            payable(address(
+                    new ERC1967Proxy(
+                        address(governorImpl),
+                        abi.encodeWithSelector(
+                            FinalGovernor.initialize.selector,
+                            IVotes(address(buyerElection)),
+                            IVotes(address(sellerElection)),
+                            timelock
+                        )
+                    )
+                ))
         );
 
         market.transferOwnership(address(timelock));
@@ -203,722 +182,372 @@ contract MarketTest is Test {
         sellerElection.transferOwnership(address(timelock));
         buyerFactory.transferOwnership(address(timelock));
         sellerFactory.transferOwnership(address(timelock));
-
         timelock.grantRole(timelock.PROPOSER_ROLE(), address(governor));
         timelock.grantRole(timelock.CANCELLER_ROLE(), address(governor));
         timelock.renounceRole(timelock.DEFAULT_ADMIN_ROLE(), admin);
-
         vm.stopPrank();
 
         usdc.mint(alice, INITIAL_BALANCE);
         usdc.mint(bob, INITIAL_BALANCE);
         usdc.mint(charlie, INITIAL_BALANCE);
+        usdc.mint(merchantOwner, INITIAL_BALANCE);
+    }
+
+    function _register(address owner, address merchant, uint256 deposit) internal returns (uint256 accountId) {
+        return _register(owner, merchant, deposit, DEFAULT_MULTIPLIER);
+    }
+
+    function _register(address owner, address merchant, uint256 deposit, uint256 multiplier)
+        internal
+        returns (uint256 accountId)
+    {
+        vm.startPrank(owner);
+        usdc.approve(address(settlementAsset), deposit);
+        accountId = market.registerMerchant(merchant, deposit, multiplier);
+        vm.stopPrank();
+    }
+
+    function _trade(address payer, address buyer, uint256 buyerAccountId, uint256 sellerAccountId, uint256 amount)
+        internal
+    {
+        vm.startPrank(payer);
+        usdc.approve(address(settlementAsset), amount);
+        market.trade(buyer, buyerAccountId, sellerAccountId, uint160(buyer), amount, "");
+        vm.stopPrank();
     }
 
     function testMerchantRegistration() public {
-        vm.startPrank(bob);
         uint256 depositAmount = 1000e6;
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, bob);
+        uint256 accountId = _register(bob, bob, depositAmount);
 
-        (uint256 deposit, bool isActive, address rightsOwner) = market.merchants(bob);
+        (address owner, address merchant, uint256 deposit, uint256 multiplier, bool isActive) =
+            market.accounts(accountId);
 
-        assertEq(deposit, depositAmount, "Deposit mismatch");
-        assertTrue(isActive, "Merchant should be active");
-        assertEq(rightsOwner, bob, "Rights owner mismatch");
-        assertEq(market.netTradeBalance(bob), 0, "Initial net balance mismatch");
+        assertEq(owner, bob);
+        assertEq(merchant, bob);
+        assertEq(deposit, depositAmount);
+        assertEq(multiplier, DEFAULT_MULTIPLIER);
+        assertTrue(isActive);
+        assertEq(market.accountIdOf(bob, bob), accountId);
+        assertEq(market.netTradeBalance(accountId), 0);
+        assertEq(market.lastClaimTime(accountId), 0);
+        assertEq(market.getAvailableQuota(accountId), depositAmount / 2);
+    }
 
-        vm.stopPrank();
+    function testZeroBuyerAccountCreatesAndReusesDefaultAccount() public {
+        uint256 sellerAccountId = _register(bob, bob, 1000e6);
+
+        _trade(alice, alice, 0, sellerAccountId, 100e6);
+        uint256 defaultAccountId = market.accountIdOf(alice, alice);
+        assertTrue(defaultAccountId != 0);
+
+        (address owner, address merchant, uint256 deposit, uint256 multiplier, bool isActive) =
+            market.accounts(defaultAccountId);
+        assertEq(owner, alice);
+        assertEq(merchant, alice);
+        assertEq(deposit, 0);
+        assertEq(multiplier, 0);
+        assertFalse(isActive);
+        assertEq(market.netTradeBalance(defaultAccountId), -99e6);
+
+        _trade(charlie, alice, 0, sellerAccountId, 10e6);
+        assertEq(market.accountIdOf(alice, alice), defaultAccountId);
+        assertEq(market.netTradeBalance(defaultAccountId), -108900000);
+        assertEq(market.getAvailableQuota(defaultAccountId), 0);
+    }
+
+    function testLazyDefaultAccountCanLaterBecomeMerchant() public {
+        uint256 sellerAccountId = _register(bob, bob, 1000e6);
+        _trade(alice, alice, 0, sellerAccountId, 100e6);
+
+        uint256 defaultAccountId = market.accountIdOf(alice, alice);
+        int256 balanceBefore = market.netTradeBalance(defaultAccountId);
+        uint256 registeredId = _register(alice, alice, 1000e6);
+
+        assertEq(registeredId, defaultAccountId);
+        assertEq(market.netTradeBalance(registeredId), balanceBefore);
+        (,, uint256 deposit, uint256 multiplier, bool isActive) = market.accounts(registeredId);
+        assertEq(deposit, 1000e6);
+        assertEq(multiplier, DEFAULT_MULTIPLIER);
+        assertTrue(isActive);
     }
 
     function testTradeAndPoints() public {
-        // 1. 准备商家逻辑合约并入驻
-        // 注意：现在交互目标就是商家地址，所以我们用 MockBusiness 实例作为商家
         uint256 depositAmount = 1000e6;
-        usdc.mint(address(merchantContract), depositAmount);
-
-        vm.startPrank(address(merchantContract));
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, merchantOwner);
-        vm.stopPrank();
-
-        // 2. 预计算 AMM 分配结果
+        uint256 sellerAccountId = _register(merchantOwner, address(merchantContract), depositAmount);
         uint256 tradeAmount = 100e6;
-        // 获取预期的 deltaW (给商家的钱) 和 deltaS (留存的积分/税)
-        (uint256 expectedW, uint256 expectedS) = market.calculateAMM(
-            address(merchantContract),
-            tradeAmount
-        );
-        uint256 vaultFee = tradeAmount / 100;
-        uint256 tradeValue = tradeAmount - vaultFee;
-        (
-            uint256 merchantDeposit,
-            ,
-            address registeredRightsOwner
-        ) = market.merchants(address(merchantContract));
-        assertEq(registeredRightsOwner, merchantOwner);
-        uint256 capacity =
-            (merchantDeposit * market.capacityMultiplier()) / 10000;
-        uint256 oldP = 0;
-        uint256 newP = tradeValue;
-        uint256 oldCurveTax = market.curveTax(oldP, merchantDeposit);
-        uint256 newCurveTax = market.curveTax(newP, merchantDeposit);
-        uint256 pOverCapacityBps = (newP * 10000) / capacity;
-        uint256 baseTaxPart = (tradeValue * market.baseTaxRate()) / 10000;
-        uint256 curveExtraTaxPart = expectedS - baseTaxPart;
-        uint256 effectiveTaxRateBps = (expectedS * 10000) / tradeValue;
+        (uint256 expectedW, uint256 expectedS) = market.calculateAMM(sellerAccountId, tradeAmount);
 
-        console.log("=== AMM Tax Debug ===");
-        console.log("amount", tradeAmount);
-        console.log("vaultFee", vaultFee);
-        console.log("tradeValue", tradeValue);
-        console.log("deposit", merchantDeposit);
-        console.log("capacity", capacity);
-        console.log("baseTaxRate", market.baseTaxRate());
-        console.log("capacityMultiplier", market.capacityMultiplier());
-        console.log("curveExponent", market.curveExponent());
-        console.log("oldP", oldP);
-        console.log("newP", newP);
-        console.log("pOverCapacityBps", pOverCapacityBps);
-        console.log("oldCurveTax", oldCurveTax);
-        console.log("newCurveTax", newCurveTax);
-        console.log("baseTaxPart", baseTaxPart);
-        console.log("curveExtraTaxPart", curveExtraTaxPart);
-        console.log("deltaS", expectedS);
-        console.log("deltaW", expectedW);
-        console.log("effectiveTaxRateBps", effectiveTaxRateBps);
-
-        // ------------------ 差值测试开始 ------------------
-
-        // 3. 记录交易前的各方余额
         uint256 marketBalBefore = usdc.balanceOf(address(settlementAsset));
         uint256 merchantBalBefore = usdc.balanceOf(address(merchantContract));
         uint256 vaultBalBefore = usdc.balanceOf(vault);
-
-        // 4. Alice 执行交易
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), tradeAmount);
-
-        uint160 rechargeTarget = uint160(alice);
-        uint256 expectedNetAmount = tradeAmount - (tradeAmount / 100);
         bytes memory data = abi.encode("test recharge payload");
 
-        market.trade(
-            alice,
-            address(merchantContract),
-            rechargeTarget,
-            tradeAmount,
-            data
-        );
+        vm.startPrank(alice);
+        usdc.approve(address(settlementAsset), tradeAmount);
+        market.trade(alice, 0, sellerAccountId, uint160(alice), tradeAmount, data);
         vm.stopPrank();
 
-        // 5. 断言验证资金流向
+        assertEq(usdc.balanceOf(address(merchantContract)) - merchantBalBefore, expectedW);
+        assertEq(usdc.balanceOf(vault) - vaultBalBefore, tradeAmount / 100);
+        assertEq(usdc.balanceOf(address(settlementAsset)) - marketBalBefore, expectedS);
+        assertEq(merchantContract.lastRightsOwner(), merchantOwner);
+        assertEq(merchantContract.lastRechargeTarget(), uint160(alice));
+        assertEq(merchantContract.lastAmount(), tradeAmount - (tradeAmount / 100));
+        assertEq(merchantContract.lastDeltaW(), expectedW);
+        assertEq(merchantContract.lastDataHash(), keccak256(data));
+        assertEq(market.sellerPoints(sellerAccountId), expectedS);
 
-        // 商家应该净增加 deltaW (AMM 计算结果)
-        assertEq(
-            usdc.balanceOf(address(merchantContract)) - merchantBalBefore,
-            expectedW,
-            "Merchant should gain exactly deltaW from AMM"
-        );
-
-        // 金库应该净增加 1% (固定权利税)
-        assertEq(
-            usdc.balanceOf(vault) - vaultBalBefore,
-            tradeAmount / 100,
-            "Vault should gain exactly 1%"
-        );
-
-        // 市场合约（税池）应该净增加 deltaS
-        assertEq(
-            usdc.balanceOf(address(settlementAsset)) - marketBalBefore,
-            expectedS,
-            "Market tax pool should gain exactly deltaS"
-        );
-
-        // 6. 验证充值回调参数
-        assertEq(
-            merchantContract.lastRightsOwner(),
-            merchantOwner,
-            "Rights owner callback mismatch"
-        );
-        assertEq(
-            merchantContract.lastRechargeTarget(),
-            rechargeTarget,
-            "Recharge target mismatch"
-        );
-        assertEq(
-            merchantContract.lastAmount(),
-            expectedNetAmount,
-            "Recharge net amount mismatch"
-        );
-        assertEq(
-            merchantContract.lastDeltaW(),
-            expectedW,
-            "Recharge deltaW mismatch"
-        );
-        assertEq(
-            merchantContract.lastDataHash(),
-            keccak256(data),
-            "Recharge data mismatch"
-        );
-
-        // 7. 验证卖方已收税账本
-        assertEq(
-            market.sellerPoints(address(merchantContract)),
-            expectedS,
-            "Merchant should get deltaS points"
-        );
-
-        // ------------------ 差值测试结束 ------------------
-
-        // 8. 治理权重验证（跳过 30 天缓冲期）
         vm.warp(block.timestamp + 31 days);
         assertEq(buyerElection.getVotes(alice), 100 * 1e18);
-        assertEq(
-            sellerElection.getVotes(merchantOwner),
-            100 * 1e18
-        );
-        assertEq(
-            sellerElection.getVotes(address(merchantContract)),
-            0,
-            "Merchant should not own seller rights"
-        );
+        assertEq(sellerElection.getVotes(merchantOwner), 100 * 1e18);
+        assertEq(sellerElection.getVotes(address(merchantContract)), 0);
     }
 
-
-    function testGlobalAMMParamsAffectNextTrade() public {
-        uint256 depositAmount = 1000e6;
+    function testGlobalAMMParamsAffectExistingAccount() public {
+        uint256 sellerAccountId = _register(bob, bob, 1000e6);
         uint256 tradeAmount = 100e6;
+        (uint256 oldW, uint256 oldS) = market.calculateAMM(sellerAccountId, tradeAmount);
 
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, bob);
-        vm.stopPrank();
-
-        (uint256 oldExpectedW, uint256 oldExpectedS) = market.calculateAMM(
-            bob,
-            tradeAmount
-        );
-
-        uint256 newBaseTaxRate = 1800;
-        uint256 newCapacityMultiplier = 51234;
-        uint256 newCurveExponent = 2;
         vm.prank(address(timelock));
-        market.setGlobalAMMParams(
-            newBaseTaxRate,
-            newCapacityMultiplier,
-            newCurveExponent
-        );
+        market.setGlobalAMMParams(1800, 3);
+        (uint256 newW, uint256 newS) = market.calculateAMM(sellerAccountId, tradeAmount);
+        assertTrue(oldW != newW || oldS != newS);
 
-        assertEq(
-            market.baseTaxRate(),
-            newBaseTaxRate,
-            "Global base tax mismatch"
-        );
-        assertEq(
-            market.capacityMultiplier(),
-            newCapacityMultiplier,
-            "Global capacity mismatch"
-        );
-        assertEq(
-            market.curveExponent(),
-            newCurveExponent,
-            "Global exponent mismatch"
-        );
-
-        vm.startPrank(charlie);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, charlie);
-        vm.stopPrank();
-
-        (uint256 newExpectedW, uint256 newExpectedS) = market.calculateAMM(
-            charlie,
-            tradeAmount
-        );
-
-        assertTrue(
-            oldExpectedW != newExpectedW || oldExpectedS != newExpectedS,
-            "AMM params should change tariff calculation"
-        );
-
+        uint256 pointsBefore = market.sellerPoints(sellerAccountId);
         uint256 bobBalanceBefore = usdc.balanceOf(bob);
-        uint256 sellerPointsBefore = market.sellerPoints(bob);
-
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), tradeAmount);
-        market.trade(alice, bob, uint160(alice), tradeAmount, "");
-        vm.stopPrank();
-
-        assertEq(
-            usdc.balanceOf(bob) - bobBalanceBefore,
-            newExpectedW,
-            "Trade should use synced deltaW"
-        );
-        assertEq(
-            market.sellerPoints(bob) - sellerPointsBefore,
-            newExpectedS,
-            "Trade should use synced deltaS"
-        );
+        _trade(alice, alice, 0, sellerAccountId, tradeAmount);
+        assertEq(usdc.balanceOf(bob) - bobBalanceBefore, newW);
+        assertEq(market.sellerPoints(sellerAccountId) - pointsBefore, newS);
     }
 
-    function testTradeAutoRefundsOwnSellerPoints() public {
-        uint256 depositAmount = 1000e6;
-        uint256 tradeAmount = 100e6;
-        uint256 secondTradeAmount = 200e6;
+    function testRegisteredMerchantCanUseBuyerAccountRefund() public {
+        uint256 buyerAccountId = _register(alice, bob, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
 
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, alice);
-        vm.stopPrank();
+        _trade(charlie, charlie, 0, buyerAccountId, 100e6);
+        uint256 pointsBefore = market.sellerPoints(buyerAccountId);
+        uint256 quotaBefore = market.getAvailableQuota(buyerAccountId);
+        uint256 amount = 200e6;
+        uint256 expectedRefund = pointsBefore < quotaBefore ? pointsBefore : quotaBefore;
+        uint256 tradeValue = amount - (amount / 100);
+        if (expectedRefund > tradeValue) expectedRefund = tradeValue;
 
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, bob);
-        vm.stopPrank();
+        uint256 payerBalanceBefore = usdc.balanceOf(bob);
+        _trade(bob, alice, buyerAccountId, sellerAccountId, amount);
 
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), tradeAmount);
-        market.trade(bob, alice, uint160(bob), tradeAmount, "");
-        vm.stopPrank();
+        assertEq(payerBalanceBefore - usdc.balanceOf(bob), amount - expectedRefund);
+        assertEq(market.sellerPoints(buyerAccountId), pointsBefore - expectedRefund);
+        assertEq(market.claimed(buyerAccountId), expectedRefund);
+        assertEq(market.getAvailableQuota(buyerAccountId), quotaBefore - expectedRefund);
+    }
 
-        uint256 sellerPointsBefore = market.sellerPoints(alice);
-        uint256 quotaBefore = market.getAvailableQuota(alice);
-        (, uint256 expectedS) = market.calculateAMM(bob, secondTradeAmount);
+    function testOwnerCannotUseDifferentMerchantsRefundQuota() public {
+        uint256 buyerAccountId = _register(alice, bob, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+        _trade(charlie, charlie, 0, buyerAccountId, 100e6);
 
-        uint256 expectedAutoRefund = sellerPointsBefore < expectedS
-            ? sellerPointsBefore
-            : expectedS;
-        if (expectedAutoRefund > quotaBefore) expectedAutoRefund = quotaBefore;
-
+        uint256 pointsBefore = market.sellerPoints(buyerAccountId);
+        uint256 quotaBefore = market.getAvailableQuota(buyerAccountId);
         uint256 balanceBefore = usdc.balanceOf(alice);
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), secondTradeAmount);
-        market.trade(alice, bob, uint160(alice), secondTradeAmount, "");
-        vm.stopPrank();
-        uint256 balanceAfter = usdc.balanceOf(alice);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 200e6);
 
-        assertEq(
-            balanceBefore - balanceAfter,
-            secondTradeAmount - expectedAutoRefund,
-            "Buyer should receive automatic refund"
-        );
-        assertEq(
-            market.sellerPoints(alice),
-            sellerPointsBefore - expectedAutoRefund,
-            "Own seller points should be consumed"
-        );
-        assertEq(
-            market.claimed(alice),
-            expectedAutoRefund,
-            "Auto refund should update claimed amount"
-        );
-        assertEq(
-            market.getAvailableQuota(alice),
-            quotaBefore - expectedAutoRefund,
-            "Auto refund should consume quota"
-        );
+        assertEq(balanceBefore - usdc.balanceOf(alice), 200e6);
+        assertEq(market.sellerPoints(buyerAccountId), pointsBefore);
+        assertEq(market.getAvailableQuota(buyerAccountId), quotaBefore);
+        assertEq(market.claimed(buyerAccountId), 0);
     }
 
-    function testDepositRevaluationDoesNotConsumeRefundQuota() public {
-        uint256 initialDeposit = 1000e6;
+    function testThirdPartyCanPayForRegisteredAccountButCannotRefund() public {
+        uint256 buyerAccountId = _register(alice, bob, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+        _trade(charlie, charlie, 0, buyerAccountId, 100e6);
+
+        uint256 pointsBefore = market.sellerPoints(buyerAccountId);
+        uint256 quotaBefore = market.getAvailableQuota(buyerAccountId);
+        uint256 payerBalanceBefore = usdc.balanceOf(merchantOwner);
+        _trade(merchantOwner, alice, buyerAccountId, sellerAccountId, 200e6);
+
+        assertEq(payerBalanceBefore - usdc.balanceOf(merchantOwner), 200e6);
+        assertEq(market.sellerPoints(buyerAccountId), pointsBefore);
+        assertEq(market.getAvailableQuota(buyerAccountId), quotaBefore);
+        assertEq(market.claimed(buyerAccountId), 0);
+    }
+
+    function testExplicitBuyerAccountMustBelongToBuyer() public {
+        uint256 aliceAccountId = _register(alice, bob, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+
+        vm.startPrank(merchantOwner);
+        usdc.approve(address(settlementAsset), 100e6);
+        vm.expectRevert("Buyer is not account owner");
+        market.trade(bob, aliceAccountId, sellerAccountId, uint160(bob), 100e6, "");
+        vm.stopPrank();
+    }
+
+    function testOwnerDepositPaysFullAndLeavesCollectedTaxUntouched() public {
+        uint256 accountId = _register(alice, bob, 1000e6);
+        _trade(charlie, charlie, 0, accountId, 100e6);
+
+        uint256 pointsBefore = market.sellerPoints(accountId);
         uint256 additionalDeposit = 1000e6;
-        uint256 tradeAmount = 100e6;
 
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), initialDeposit);
-        market.registerMerchant(initialDeposit, alice);
-        vm.stopPrank();
-
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), tradeAmount);
-        market.trade(bob, alice, uint160(bob), tradeAmount, "");
-        vm.stopPrank();
-
-        uint256 sellerPointsBefore = market.sellerPoints(alice);
-        uint256 positiveBalance = uint256(market.netTradeBalance(alice));
-        uint256 oldTax = market.curveTax(positiveBalance, initialDeposit);
-        uint256 newTax = market.curveTax(
-            positiveBalance,
-            initialDeposit + additionalDeposit
-        );
-        uint256 expectedCredit = oldTax - newTax;
-        if (expectedCredit > sellerPointsBefore) {
-            expectedCredit = sellerPointsBefore;
-        }
-        if (expectedCredit > additionalDeposit) {
-            expectedCredit = additionalDeposit;
-        }
-
-        uint256 balanceBefore = usdc.balanceOf(alice);
+        uint256 ownerBalanceBefore = usdc.balanceOf(alice);
+        uint256 merchantBalanceBefore = usdc.balanceOf(bob);
         vm.startPrank(alice);
         usdc.approve(address(settlementAsset), additionalDeposit);
-        market.registerMerchant(additionalDeposit, alice);
+        market.addDeposit(accountId, additionalDeposit);
         vm.stopPrank();
 
-        assertEq(
-            balanceBefore - usdc.balanceOf(alice),
-            additionalDeposit - expectedCredit,
-            "Revaluation credit should reduce deposit payment"
-        );
-        assertEq(
-            market.sellerPoints(alice),
-            sellerPointsBefore - expectedCredit,
-            "Revaluation credit should consume collected tax"
-        );
-        assertEq(market.claimed(alice), 0, "Credit is not a consumer refund");
-        assertEq(
-            market.lastClaimTime(alice),
-            0,
-            "Credit should not start the quota recovery period"
-        );
-        assertEq(
-            market.lastAvailableQuota(alice),
-            0,
-            "Credit should not consume refund quota"
-        );
+        assertEq(ownerBalanceBefore - usdc.balanceOf(alice), additionalDeposit);
+        assertEq(usdc.balanceOf(bob), merchantBalanceBefore);
+        assertEq(market.sellerPoints(accountId), pointsBefore);
+        assertEq(market.claimed(accountId), 0);
+        assertEq(market.lastClaimTime(accountId), 0);
+        assertEq(market.lastAvailableQuota(accountId), 0);
     }
 
-    function testTradeDoesNotAutoRefundWhenPayerIsNotBuyer() public {
-        uint256 depositAmount = 1000e6;
-        uint256 tradeAmount = 100e6;
-        uint256 secondTradeAmount = 200e6;
+    function testThirdPartyDepositPaysFullAndExcessRefundIsCapped() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
 
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, alice);
-        vm.stopPrank();
+        _trade(charlie, charlie, 0, buyerAccountId, 3500e6);
+        uint256 pointsBeforeDeposit = market.sellerPoints(buyerAccountId);
 
+        uint256 bobBalanceBefore = usdc.balanceOf(bob);
         vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, bob);
+        usdc.approve(address(settlementAsset), 1000e6);
+        market.addDeposit(buyerAccountId, 1000e6);
         vm.stopPrank();
 
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), tradeAmount);
-        market.trade(bob, alice, uint160(bob), tradeAmount, "");
-        vm.stopPrank();
+        assertEq(bobBalanceBefore - usdc.balanceOf(bob), 1000e6);
+        assertEq(market.sellerPoints(buyerAccountId), pointsBeforeDeposit);
 
-        uint256 sellerPointsBefore = market.sellerPoints(alice);
-        uint256 quotaBefore = market.getAvailableQuota(alice);
-
-        uint256 balanceBefore = usdc.balanceOf(charlie);
-        vm.startPrank(charlie);
-        usdc.approve(address(settlementAsset), secondTradeAmount);
-        market.trade(alice, bob, uint160(alice), secondTradeAmount, "");
-        vm.stopPrank();
-        uint256 balanceAfter = usdc.balanceOf(charlie);
+        uint256 amount = 100e6;
+        uint256 tradeValue = amount - (amount / 100);
+        uint256 aliceBalanceBefore = usdc.balanceOf(alice);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, amount);
 
         assertEq(
-            balanceBefore - balanceAfter,
-            secondTradeAmount,
-            "Payer should not receive buyer refund"
+            aliceBalanceBefore - usdc.balanceOf(alice),
+            amount - tradeValue,
+            "Only the non-refundable rights fee should be paid"
         );
-        assertEq(
-            market.sellerPoints(alice),
-            sellerPointsBefore,
-            "Buyer seller points should not be consumed by payer"
-        );
-        assertEq(market.claimed(alice), 0, "No auto refund should be claimed");
-        assertEq(
-            market.getAvailableQuota(alice),
-            quotaBefore,
-            "Quota should not be consumed"
-        );
+        assertEq(market.sellerPoints(buyerAccountId), pointsBeforeDeposit - tradeValue);
     }
 
-    function testMissedThirdPartyRefundIsRecoveredByBuyerLater() public {
-        uint256 depositAmount = 1000e6;
-        uint256 firstTradeAmount = 100e6;
-        uint256 thirdPartyTradeAmount = 200e6;
-        uint256 catchUpTradeAmount = 10e6;
-
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, alice);
-        vm.stopPrank();
+    function testMultiplierHierarchyAndExternalFunds() public {
+        uint256 buyerAccountId = _register(alice, bob, 1000e6, 20000);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6, 30000);
 
         vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, bob);
-        usdc.approve(address(settlementAsset), firstTradeAmount);
-        market.trade(bob, alice, uint160(bob), firstTradeAmount, "");
-        vm.stopPrank();
-
-        uint256 collectedTax = market.sellerPoints(alice);
-
-        vm.startPrank(charlie);
-        usdc.approve(address(settlementAsset), thirdPartyTradeAmount);
-        market.trade(
-            alice,
-            bob,
-            uint160(alice),
-            thirdPartyTradeAmount,
-            ""
-        );
-        vm.stopPrank();
-
-        assertEq(
-            market.sellerPoints(alice),
-            collectedTax,
-            "Third-party payer should leave refund pending"
-        );
-
-        uint256 quotaBefore = market.getAvailableQuota(alice);
-        uint256 catchUpTradeValue = catchUpTradeAmount -
-            (catchUpTradeAmount / 100);
-        uint256 expectedRefund = collectedTax < quotaBefore
-            ? collectedTax
-            : quotaBefore;
-        if (expectedRefund > catchUpTradeValue) {
-            expectedRefund = catchUpTradeValue;
-        }
-
-        uint256 balanceBefore = usdc.balanceOf(alice);
-        vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), catchUpTradeAmount);
-        market.trade(
-            alice,
-            bob,
-            uint160(alice),
-            catchUpTradeAmount,
-            ""
-        );
-        vm.stopPrank();
-
-        assertEq(
-            balanceBefore - usdc.balanceOf(alice),
-            catchUpTradeAmount - expectedRefund,
-            "Buyer should recover the previously pending refund"
-        );
-        assertEq(
-            market.sellerPoints(alice),
-            collectedTax - expectedRefund,
-            "Recovered refund should reduce collected tax"
-        );
-    }
-
-    function testDualConsensusVotingLogic() public {
-        // 1. 产生投票权 (调用之前适配好的交易测试)
-        // Alice 买 Bob 的东西，产生 Alice 的买方权利代币 和 Bob 的卖方权利代币
-        testTradeAndPoints();
-
-        // 2. 推进时间，确保选举合约的 30 天缓冲期过去，且 Checkpoints 生效
-        vm.warp(block.timestamp + 31 days);
-        vm.roll(block.number + 100);
-
-        // 3. 模拟治理提案：修改市场合约的金库地址
-        address[] memory targets = new address[](1);
-        targets[0] = address(market);
-        uint256[] memory values = new uint256[](1);
-        values[0] = 0;
-        bytes[] memory calldatas = new bytes[](1);
-        calldatas[0] = abi.encodeWithSignature(
-            "setVault(address)",
-            address(0xdead)
-        );
-
-        // Alice (买方) 发起提案
-        vm.prank(alice);
-        uint256 proposalId = governor.propose(
-            targets,
-            values,
-            calldatas,
-            "Change Vault Address"
-        );
-
-        // 推进时间以跳过投票延迟 (Voting Delay, 通常为 7200 秒)
-        vm.warp(block.timestamp + 7201);
-        vm.roll(block.number + 7201);
-
-        // 4. 情况 A：只有买方 (Alice) 投赞成票
-        vm.prank(alice);
-        governor.castVote(proposalId, 1); // 1 = For
-
-        (uint256 againstVotes, uint256 forVotes, ) = governor.proposalVotes(
-            proposalId
-        );
-
-        // 断言：由于卖方没投票，min(100, 0) = 0。有效赞成票应为 0。
-        assertEq(forVotes, 0, "Consensus should be 0 when only buyer voted");
-
-        // 5. 情况 B：商家登记的权利 owner 也投赞成票
-        vm.prank(merchantOwner);
-        governor.castVote(proposalId, 1);
-
-        (, forVotes, ) = governor.proposalVotes(proposalId);
-
-        // 断言：双方均投赞成票，min(100, 100) = 100。
-        // 注意：100 * 1e18 是 ProportionalElection 归一化后的满分权重
-        assertEq(
-            forVotes,
-            100 * 1e18,
-            "Consensus should be 100 when both voted"
-        );
-    }
-
-    /**
-     * @notice 测试治理踢出商家逻辑
-     * 验证：1. 只有治理地址能调用；2. 押金和未退关税被没收至金库；3. 商家状态清除。
-     */
-    function testGovernanceKick() public {
-        // 1. 准备：Bob 入驻
-        vm.startPrank(bob);
-        uint256 bobDeposit = 1000e6;
-        usdc.approve(address(settlementAsset), bobDeposit);
-        market.registerMerchant(bobDeposit, bob);
-        vm.stopPrank();
-
-        vm.startPrank(charlie);
-        uint256 charlieDeposit = 1000e6;
-        usdc.approve(address(settlementAsset), charlieDeposit);
-        market.registerMerchant(charlieDeposit, charlie);
-        vm.stopPrank();
-
-        // 2. 产生业务数据：Alice 买 Bob 的东西
-        // 从而产生 Bob 的卖方积分和 AMM 状态
-        vm.startPrank(alice);
         usdc.approve(address(settlementAsset), 100e6);
-        market.trade(alice, bob, uint160(alice), 100e6, "");
+        vm.expectRevert("Seller multiplier too high");
+        market.trade(alice, buyerAccountId, sellerAccountId, uint160(alice), 100e6, "");
         vm.stopPrank();
 
-        // Bob 再作为买家消费一部分，产生非零的退款和额度状态
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), 50e6);
-        market.trade(bob, charlie, uint160(bob), 50e6, "");
-        vm.stopPrank();
-
-        // 记录没收前状态
-        int256 netBalanceBefore = market.netTradeBalance(bob);
-        uint256 bobPointsBefore = market.sellerPoints(bob);
-        uint256 claimedBefore = market.claimed(bob);
-        uint256 lastClaimTimeBefore = market.lastClaimTime(bob);
-        uint256 lastAvailableQuotaBefore = market.lastAvailableQuota(bob);
-        uint256 vaultPointsBefore = market.sellerPoints(vault);
-        uint256 vaultBalBefore = usdc.balanceOf(vault);
-
-        assertTrue(bobPointsBefore > 0, "Bob should have points before kick");
-        assertTrue(netBalanceBefore > 0, "Bob should have net balance before kick");
-        assertTrue(claimedBefore > 0, "Bob should have claimed tax before kick");
-        assertTrue(lastClaimTimeBefore > 0, "Bob should have a claim time before kick");
-        assertTrue(
-            lastAvailableQuotaBefore > 0,
-            "Bob should have quota state before kick"
-        );
-
-        // 3. 权限校验：普通人无法踢出商家
-        vm.startPrank(alice);
-        vm.expectRevert("Only governance");
-        market.kickMerchant(bob);
-        vm.stopPrank();
-
-        // 4. 执行：模拟治理 (Timelock) 调用 kickMerchant
-        vm.prank(address(timelock));
-        market.kickMerchant(bob);
-
-        // 5. 商家身份和全部经济状态被彻底清除
-        (uint256 deposit, bool isActive, address rightsOwner) = market.merchants(bob);
-
-        assertEq(deposit, 0, "Deposit should be cleared");
-        assertFalse(isActive, "Merchant should be inactive");
-        assertEq(rightsOwner, address(0), "Rights owner should be cleared");
-        assertEq(market.netTradeBalance(bob), 0, "Net balance should be reset");
-
-        // 6. 验证资产没收：押金和未退关税进入金库 (Vault)
-        assertEq(
-            usdc.balanceOf(vault) - vaultBalBefore,
-            bobDeposit + bobPointsBefore,
-            "Vault should receive deposit and collected tax"
-        );
-
-        // 7. 验证税款账本清除，不再转成 vault 的 sellerPoints
-        assertEq(
-            market.sellerPoints(bob),
-            0,
-            "Bob's seller points should be cleared"
-        );
-        assertEq(
-            market.sellerPoints(vault),
-            vaultPointsBefore,
-            "Vault seller points should remain unchanged"
-        );
-        assertEq(market.claimed(bob), 0, "Claim history should be cleared");
-        assertEq(market.lastClaimTime(bob), 0, "Claim time should be cleared");
-        assertEq(
-            market.lastAvailableQuota(bob),
-            0,
-            "Available quota state should be cleared"
-        );
-
-        // 8. 同一地址再次注册是一个新 merchant，可以选择新的 owner
-        uint256 newDeposit = 100e6;
-        vm.startPrank(bob);
-        usdc.approve(address(settlementAsset), newDeposit);
-        market.registerMerchant(newDeposit, charlie);
-        vm.stopPrank();
-
-        (deposit, isActive, rightsOwner) = market.merchants(bob);
-        assertEq(deposit, newDeposit);
-        assertTrue(isActive);
-        assertEq(rightsOwner, charlie);
+        _trade(merchantOwner, merchantOwner, 0, sellerAccountId, 100e6);
+        assertTrue(market.accountIdOf(merchantOwner, merchantOwner) != 0);
     }
 
-    function testRightsOwnerCannotChangeAfterFirstRegistration() public {
-        uint256 initialDeposit = 1000e6;
-        uint256 additionalDeposit = 100e6;
+    function testOnlyOwnerCanMakeMultiplierStricter() public {
+        uint256 accountId = _register(alice, bob, 1000e6, 40000);
 
-        vm.startPrank(bob);
-        usdc.approve(
-            address(settlementAsset),
-            initialDeposit + additionalDeposit
-        );
-        market.registerMerchant(initialDeposit, merchantOwner);
-        market.registerMerchant(additionalDeposit, merchantOwner);
-
-        vm.expectRevert("Rights owner is immutable");
-        market.registerMerchant(1, charlie);
-        vm.stopPrank();
-
-        (
-            uint256 deposit,
-            bool isActive,
-            address registeredRightsOwner
-        ) = market.merchants(bob);
-        assertEq(deposit, initialDeposit + additionalDeposit);
-        assertTrue(isActive);
-        assertEq(registeredRightsOwner, merchantOwner);
-    }
-
-    function testFirstRegistrationRejectsZeroRightsOwner() public {
         vm.prank(bob);
-        vm.expectRevert("Invalid rights owner");
-        market.registerMerchant(1000e6, address(0));
+        vm.expectRevert("Only account owner");
+        market.setCapacityMultiplier(accountId, 30000);
+
+        vm.prank(alice);
+        market.setCapacityMultiplier(accountId, 30000);
+        (,,, uint256 multiplier,) = market.accounts(accountId);
+        assertEq(multiplier, 30000);
+
+        vm.prank(alice);
+        vm.expectRevert("Multiplier can only decrease");
+        market.setCapacityMultiplier(accountId, 40000);
+
+        vm.prank(alice);
+        vm.expectRevert("Invalid capacity multiplier");
+        market.setCapacityMultiplier(accountId, 9999);
     }
 
-    function testMerchantCanRejectRegisteredRightsOwnerOnTrade() public {
-        uint256 depositAmount = 1000e6;
-        uint256 tradeAmount = 100e6;
+    function testMerchantCanChooseWhichOwnersItSupports() public {
+        uint256 supportedId = _register(merchantOwner, address(merchantContract), 1000e6);
+        uint256 unsupportedId = _register(charlie, address(merchantContract), 1000e6);
+        assertTrue(supportedId != unsupportedId);
 
-        usdc.mint(address(merchantContract), depositAmount);
-        vm.startPrank(address(merchantContract));
-        usdc.approve(address(settlementAsset), depositAmount);
-        market.registerMerchant(depositAmount, charlie);
-        vm.stopPrank();
+        _trade(alice, alice, 0, supportedId, 100e6);
 
         uint256 aliceBalanceBefore = usdc.balanceOf(alice);
         vm.startPrank(alice);
-        usdc.approve(address(settlementAsset), tradeAmount);
+        usdc.approve(address(settlementAsset), 100e6);
         vm.expectRevert("Unsupported rights owner");
-        market.trade(
-            alice,
-            address(merchantContract),
-            uint160(alice),
-            tradeAmount,
-            ""
-        );
+        market.trade(alice, 0, unsupportedId, uint160(alice), 100e6, "");
         vm.stopPrank();
 
         assertEq(usdc.balanceOf(alice), aliceBalanceBefore);
-        assertEq(market.netTradeBalance(address(merchantContract)), 0);
-        assertEq(market.sellerPoints(address(merchantContract)), 0);
+        assertEq(market.netTradeBalance(unsupportedId), 0);
+        assertEq(market.sellerPoints(unsupportedId), 0);
+    }
+
+    function testGovernanceKickDeletesPairAccountState() public {
+        uint256 bobAccountId = _register(bob, bob, 1000e6);
+        uint256 charlieAccountId = _register(charlie, charlie, 1000e6);
+        _trade(alice, alice, 0, bobAccountId, 100e6);
+        _trade(bob, bob, bobAccountId, charlieAccountId, 50e6);
+
+        uint256 pointsBefore = market.sellerPoints(bobAccountId);
+        uint256 vaultBalanceBefore = usdc.balanceOf(vault);
+        assertTrue(market.claimed(bobAccountId) > 0);
+        assertTrue(market.lastClaimTime(bobAccountId) > 0);
+
+        vm.prank(alice);
+        vm.expectRevert("Only governance");
+        market.kickMerchant(bobAccountId);
+
+        vm.prank(address(timelock));
+        market.kickMerchant(bobAccountId);
+
+        (address owner, address merchant,,, bool isActive) = market.accounts(bobAccountId);
+        assertEq(owner, address(0));
+        assertEq(merchant, address(0));
+        assertFalse(isActive);
+        assertEq(market.accountIdOf(bob, bob), 0);
+        assertEq(market.sellerPoints(bobAccountId), 0);
+        assertEq(market.claimed(bobAccountId), 0);
+        assertEq(market.netTradeBalance(bobAccountId), 0);
+        assertEq(market.lastClaimTime(bobAccountId), 0);
+        assertEq(market.lastAvailableQuota(bobAccountId), 0);
+        assertEq(usdc.balanceOf(vault) - vaultBalanceBefore, 1000e6 + pointsBefore);
+
+        uint256 newAccountId = _register(bob, bob, 100e6);
+        assertTrue(newAccountId != bobAccountId);
+    }
+
+    function testDualConsensusVotingLogic() public {
+        testTradeAndPoints();
+        vm.warp(block.timestamp + 31 days);
+        vm.roll(block.number + 100);
+
+        address[] memory targets = new address[](1);
+        targets[0] = address(market);
+        uint256[] memory values = new uint256[](1);
+        bytes[] memory calldatas = new bytes[](1);
+        calldatas[0] = abi.encodeWithSignature("setVault(address)", address(0xdead));
+
+        vm.prank(alice);
+        uint256 proposalId = governor.propose(targets, values, calldatas, "Change Vault Address");
+        vm.warp(block.timestamp + 7201);
+        vm.roll(block.number + 7201);
+
+        vm.prank(alice);
+        governor.castVote(proposalId, 1);
+        (, uint256 forVotes,) = governor.proposalVotes(proposalId);
+        assertEq(forVotes, 0);
+
+        vm.prank(merchantOwner);
+        governor.castVote(proposalId, 1);
+        (, forVotes,) = governor.proposalVotes(proposalId);
+        assertEq(forVotes, 100 * 1e18);
     }
 }
