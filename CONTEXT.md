@@ -8,7 +8,7 @@ their responsibilities remain distinct across settlement and voting code.
 **Market Account**:
 A lightweight, non-transferable numeric ID for one immutable Account
 Owner–Merchant pair. Its deposit, capacity multiplier, net trade balance,
-collected tariff, refund quota, and active state are tracked independently.
+collected tariff, deferred surplus, and active state are tracked independently.
 _Avoid_: Merchant ID, NFT
 
 **Account Owner**:
@@ -33,16 +33,29 @@ _Avoid_: Unregistered merchant
 
 **Payer**:
 The `msg.sender` funding a trade. A Payer may fund either a Default Buyer Account
-or an explicitly selected Market Account, but can use its refund quota only when
-the Payer is also that account's Merchant and the declared buyer is its Account
-Owner.
+or an explicitly selected Market Account, but can receive an immediate tariff
+refund only when the Payer is also that account's Merchant and the declared
+buyer is its Account Owner.
 _Avoid_: Buyer
 
 **Deposit Increase**:
 A permissionless, fully funded increase to a Market Account's deposit. It never
 revalues or reduces collected tariff; changes in theoretical tax are released
-later through the normal trade refund path and remain subject to refund quota.
+later through the normal trade refund path. It accelerates deferred-surplus
+release only from the time of the increase onward.
 _Avoid_: Deposit credit
+
+**Deferred Surplus**:
+The buyer-side amount of surplus that disappeared while the seller's deficit
+was reduced in the same trade. It remains taxable temporarily and declines
+linearly over time at a deposit-based rate, preventing balance-resolution bots
+from collecting and immediately refunding many accounts' tariffs.
+_Avoid_: Refund quota, deferred tax
+
+**Taxable Surplus**:
+The positive part of a Market Account's real net trade balance plus its current
+Deferred Surplus. The tariff curve is evaluated once on this combined amount.
+_Avoid_: Seller points
 
 **Capacity Multiplier**:
 A per-account capacity parameter expressed in basis points. It may only move

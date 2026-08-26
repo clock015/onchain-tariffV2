@@ -230,8 +230,8 @@ contract MarketTest is Test {
         assertTrue(isActive);
         assertEq(market.accountIdOf(bob, bob), accountId);
         assertEq(market.netTradeBalance(accountId), 0);
-        assertEq(market.lastClaimTime(accountId), 0);
-        assertEq(market.getAvailableQuota(accountId), depositAmount / 2);
+        assertEq(market.deferredSurplus(accountId), 0);
+        assertEq(market.taxableSurplus(accountId), 0);
     }
 
     function testZeroBuyerAccountCreatesAndReusesDefaultAccount() public {
@@ -253,7 +253,7 @@ contract MarketTest is Test {
         _trade(charlie, alice, 0, sellerAccountId, 10e6);
         assertEq(market.accountIdOf(alice, alice), defaultAccountId);
         assertEq(market.netTradeBalance(defaultAccountId), -108900000);
-        assertEq(market.getAvailableQuota(defaultAccountId), 0);
+        assertEq(market.deferredSurplus(defaultAccountId), 0);
     }
 
     function testLazyDefaultAccountCanLaterBecomeMerchant() public {
@@ -321,41 +321,157 @@ contract MarketTest is Test {
         assertEq(market.sellerPoints(sellerAccountId) - pointsBefore, newS);
     }
 
-    function testRegisteredMerchantCanUseBuyerAccountRefund() public {
+    function testResolvedBalanceDoesNotRefundImmediately() public {
         uint256 buyerAccountId = _register(alice, bob, 1000e6);
         uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
 
         _trade(charlie, charlie, 0, buyerAccountId, 100e6);
         uint256 pointsBefore = market.sellerPoints(buyerAccountId);
-        uint256 quotaBefore = market.getAvailableQuota(buyerAccountId);
         uint256 amount = 200e6;
-        uint256 expectedRefund = pointsBefore < quotaBefore ? pointsBefore : quotaBefore;
-        uint256 tradeValue = amount - (amount / 100);
-        if (expectedRefund > tradeValue) expectedRefund = tradeValue;
 
         uint256 payerBalanceBefore = usdc.balanceOf(bob);
         _trade(bob, alice, buyerAccountId, sellerAccountId, amount);
 
-        assertEq(payerBalanceBefore - usdc.balanceOf(bob), amount - expectedRefund);
-        assertEq(market.sellerPoints(buyerAccountId), pointsBefore - expectedRefund);
-        assertEq(market.claimed(buyerAccountId), expectedRefund);
-        assertEq(market.getAvailableQuota(buyerAccountId), quotaBefore - expectedRefund);
+        assertEq(payerBalanceBefore - usdc.balanceOf(bob), amount);
+        assertEq(market.sellerPoints(buyerAccountId), pointsBefore);
+        assertEq(market.claimed(buyerAccountId), 0);
+        assertEq(market.deferredSurplus(buyerAccountId), 99e6);
+        assertEq(market.taxableSurplus(buyerAccountId), 99e6);
     }
 
-    function testOwnerCannotUseDifferentMerchantsRefundQuota() public {
+    function testNormalSurplusReductionRefundsWithoutAmountQuota() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(bob, bob, 1000e6);
+
+        _trade(charlie, charlie, 0, buyerAccountId, 100e6);
+        uint256 pointsBefore = market.sellerPoints(buyerAccountId);
+        uint256 payerBalanceBefore = usdc.balanceOf(alice);
+
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 100e6);
+
+        assertEq(payerBalanceBefore - usdc.balanceOf(alice), 100e6 - pointsBefore);
+        assertEq(market.sellerPoints(buyerAccountId), 0);
+        assertEq(market.claimed(buyerAccountId), pointsBefore);
+        assertEq(market.deferredSurplus(buyerAccountId), 0);
+    }
+
+    function testCrossingZeroOnlyDefersMatchedResolution() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+        uint256 fundingSellerAccountId = _register(bob, bob, 1000e6);
+
+        _trade(merchantOwner, merchantOwner, 0, buyerAccountId, 1000e6);
+        _trade(charlie, charlie, sellerAccountId, fundingSellerAccountId, 100e6);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 200e6);
+
+        assertEq(market.netTradeBalance(buyerAccountId), 792e6);
+        assertEq(market.netTradeBalance(sellerAccountId), 99e6);
+        assertEq(market.deferredSurplus(buyerAccountId), 99e6);
+        assertEq(market.taxableSurplus(buyerAccountId), 891e6);
+    }
+
+    function testDeferredSurplusDecaysLinearlyWithDeposit() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+
+        _trade(charlie, charlie, sellerAccountId, buyerAccountId, 1000e6);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 2000e6);
+        assertEq(market.deferredSurplus(buyerAccountId), 990e6);
+
+        uint256 startTime = vm.getBlockTimestamp();
+        vm.warp(startTime + 15 days);
+        assertEq(market.deferredSurplus(buyerAccountId), 740e6);
+
+        vm.warp(startTime + 30 days);
+        assertEq(market.deferredSurplus(buyerAccountId), 490e6);
+    }
+
+    function testReleasedDeferredSurplusRefundsOnNextAuthorizedTrade() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 resolvingSellerAccountId = _register(charlie, charlie, 1000e6);
+        uint256 nextSellerAccountId = _register(bob, bob, 1000e6);
+
+        _trade(charlie, charlie, resolvingSellerAccountId, buyerAccountId, 1000e6);
+        _trade(alice, alice, buyerAccountId, resolvingSellerAccountId, 2000e6);
+
+        vm.warp(vm.getBlockTimestamp() + 15 days);
+        uint256 pointsBefore = market.sellerPoints(buyerAccountId);
+        uint256 newTax = market.accountCurveTax(buyerAccountId, 0);
+        uint256 expectedRefund = pointsBefore - newTax;
+        uint256 payerBalanceBefore = usdc.balanceOf(alice);
+
+        _trade(alice, alice, buyerAccountId, nextSellerAccountId, 100e6);
+
+        assertEq(payerBalanceBefore - usdc.balanceOf(alice), 100e6 - expectedRefund);
+        assertEq(market.sellerPoints(buyerAccountId), newTax);
+        assertEq(market.claimed(buyerAccountId), expectedRefund);
+    }
+
+    function testAddedDepositOnlyAcceleratesFutureDeferredRelease() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+
+        _trade(charlie, charlie, sellerAccountId, buyerAccountId, 1000e6);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 2000e6);
+
+        uint256 startTime = vm.getBlockTimestamp();
+        vm.warp(startTime + 15 days);
+        vm.startPrank(bob);
+        usdc.approve(address(settlementAsset), 1000e6);
+        market.addDeposit(buyerAccountId, 1000e6);
+        vm.stopPrank();
+        assertEq(market.deferredSurplus(buyerAccountId), 740e6);
+
+        vm.warp(startTime + 30 days);
+        assertEq(market.deferredSurplus(buyerAccountId), 240e6);
+    }
+
+    function testResolutionRatioChangeOnlyAffectsFutureRelease() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+
+        _trade(charlie, charlie, sellerAccountId, buyerAccountId, 1000e6);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 2000e6);
+
+        uint256 startTime = vm.getBlockTimestamp();
+        vm.warp(startTime + 15 days);
+        vm.prank(address(timelock));
+        market.setResolutionParams(10000);
+        vm.warp(startTime + 15 days + 15 days / 2);
+
+        assertEq(market.deferredSurplus(buyerAccountId), 490e6);
+    }
+
+    function testDeferredSurplusCountsTowardStricterCapacity() public {
+        uint256 buyerAccountId = _register(alice, alice, 1000e6);
+        uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
+
+        _trade(charlie, charlie, sellerAccountId, buyerAccountId, 2000e6);
+        _trade(alice, alice, buyerAccountId, sellerAccountId, 4000e6);
+        assertEq(market.netTradeBalance(buyerAccountId), -1980e6);
+        assertEq(market.deferredSurplus(buyerAccountId), 1980e6);
+
+        vm.prank(alice);
+        vm.expectRevert("Capacity exceeded");
+        market.setCapacityMultiplier(buyerAccountId, 10000);
+
+        vm.prank(alice);
+        market.setCapacityMultiplier(buyerAccountId, 20000);
+    }
+
+    function testOwnerCannotUseDifferentMerchantsRefund() public {
         uint256 buyerAccountId = _register(alice, bob, 1000e6);
         uint256 sellerAccountId = _register(charlie, charlie, 1000e6);
         _trade(charlie, charlie, 0, buyerAccountId, 100e6);
 
         uint256 pointsBefore = market.sellerPoints(buyerAccountId);
-        uint256 quotaBefore = market.getAvailableQuota(buyerAccountId);
         uint256 balanceBefore = usdc.balanceOf(alice);
         _trade(alice, alice, buyerAccountId, sellerAccountId, 200e6);
 
         assertEq(balanceBefore - usdc.balanceOf(alice), 200e6);
         assertEq(market.sellerPoints(buyerAccountId), pointsBefore);
-        assertEq(market.getAvailableQuota(buyerAccountId), quotaBefore);
         assertEq(market.claimed(buyerAccountId), 0);
+        assertEq(market.deferredSurplus(buyerAccountId), 99e6);
     }
 
     function testThirdPartyCanPayForRegisteredAccountButCannotRefund() public {
@@ -364,14 +480,17 @@ contract MarketTest is Test {
         _trade(charlie, charlie, 0, buyerAccountId, 100e6);
 
         uint256 pointsBefore = market.sellerPoints(buyerAccountId);
-        uint256 quotaBefore = market.getAvailableQuota(buyerAccountId);
         uint256 payerBalanceBefore = usdc.balanceOf(merchantOwner);
         _trade(merchantOwner, alice, buyerAccountId, sellerAccountId, 200e6);
 
         assertEq(payerBalanceBefore - usdc.balanceOf(merchantOwner), 200e6);
         assertEq(market.sellerPoints(buyerAccountId), pointsBefore);
-        assertEq(market.getAvailableQuota(buyerAccountId), quotaBefore);
         assertEq(market.claimed(buyerAccountId), 0);
+        assertEq(market.deferredSurplus(buyerAccountId), 99e6);
+
+        vm.warp(block.timestamp + 31 days);
+        assertTrue(buyerElection.getVotes(alice) > 0);
+        assertEq(buyerElection.getVotes(bob), 0);
     }
 
     function testExplicitBuyerAccountMustBelongToBuyer() public {
@@ -403,8 +522,7 @@ contract MarketTest is Test {
         assertEq(usdc.balanceOf(bob), merchantBalanceBefore);
         assertEq(market.sellerPoints(accountId), pointsBefore);
         assertEq(market.claimed(accountId), 0);
-        assertEq(market.lastClaimTime(accountId), 0);
-        assertEq(market.lastAvailableQuota(accountId), 0);
+        assertEq(market.deferredSurplus(accountId), 0);
     }
 
     function testThirdPartyDepositPaysFullAndExcessRefundIsCapped() public {
@@ -493,13 +611,13 @@ contract MarketTest is Test {
     function testGovernanceKickDeletesPairAccountState() public {
         uint256 bobAccountId = _register(bob, bob, 1000e6);
         uint256 charlieAccountId = _register(charlie, charlie, 1000e6);
-        _trade(alice, alice, 0, bobAccountId, 100e6);
+        _trade(charlie, charlie, charlieAccountId, bobAccountId, 50e6);
         _trade(bob, bob, bobAccountId, charlieAccountId, 50e6);
 
         uint256 pointsBefore = market.sellerPoints(bobAccountId);
         uint256 vaultBalanceBefore = usdc.balanceOf(vault);
-        assertTrue(market.claimed(bobAccountId) > 0);
-        assertTrue(market.lastClaimTime(bobAccountId) > 0);
+        assertEq(market.claimed(bobAccountId), 0);
+        assertEq(market.deferredSurplus(bobAccountId), 49.5e6);
 
         vm.prank(alice);
         vm.expectRevert("Only governance");
@@ -516,8 +634,7 @@ contract MarketTest is Test {
         assertEq(market.sellerPoints(bobAccountId), 0);
         assertEq(market.claimed(bobAccountId), 0);
         assertEq(market.netTradeBalance(bobAccountId), 0);
-        assertEq(market.lastClaimTime(bobAccountId), 0);
-        assertEq(market.lastAvailableQuota(bobAccountId), 0);
+        assertEq(market.deferredSurplus(bobAccountId), 0);
         assertEq(usdc.balanceOf(vault) - vaultBalanceBefore, 1000e6 + pointsBefore);
 
         uint256 newAccountId = _register(bob, bob, 100e6);

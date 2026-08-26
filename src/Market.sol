@@ -16,6 +16,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     uint256 public constant WAD = 1e18;
     uint256 public constant MIN_CAPACITY_MULTIPLIER = BPS;
     uint256 public constant MAX_CURVE_EXPONENT = 10;
+    uint256 public constant RESOLUTION_PERIOD = 30 days;
 
     ISettlementAsset public settlementAsset;
     IRightsToken public buyerRights;
@@ -38,6 +39,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         uint256 deltaW;
         uint256 deltaS;
         uint256 buyerRefund;
+        uint256 resolvedSurplus;
         int256 newSellerBalance;
         int256 newBuyerBalance;
     }
@@ -49,11 +51,13 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     mapping(uint256 => uint256) public sellerPoints;
     mapping(uint256 => uint256) public claimed;
     mapping(uint256 => int256) public netTradeBalance;
-    mapping(uint256 => uint256) public lastClaimTime;
-    mapping(uint256 => uint256) public lastAvailableQuota;
+    mapping(uint256 => uint256) private _deferredSurplus;
+    mapping(uint256 => uint256) private _deferredReleaseIndex;
+    mapping(uint256 => uint256) private _deferredReleaseRemainder;
 
-    uint256 public QUOTA_PERIOD;
-    uint256 public quotaRatio;
+    uint256 public resolutionRatio;
+    uint256 public resolutionIndex;
+    uint256 public resolutionIndexUpdatedAt;
     uint256 public baseTaxRate;
     uint256 public curveExponent;
 
@@ -118,8 +122,8 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         governance = _governance;
         vault = _vault;
         nextAccountId = 1;
-        QUOTA_PERIOD = 30 days;
-        quotaRatio = 5000;
+        resolutionRatio = 5000;
+        resolutionIndexUpdatedAt = block.timestamp;
         baseTaxRate = 900;
         curveExponent = 2;
     }
@@ -132,6 +136,10 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
 
     function _positive(int256 value) internal pure returns (uint256) {
         return value > 0 ? uint256(value) : 0;
+    }
+
+    function _negativeMagnitude(int256 value) internal pure returns (uint256) {
+        return value < 0 ? uint256(-(value + 1)) + 1 : 0;
     }
 
     function _toInt256(uint256 value) internal pure returns (int256) {
@@ -176,6 +184,15 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         return _accountCurveTax(accountId, positiveBalance);
     }
 
+    function deferredSurplus(uint256 accountId) public view returns (uint256) {
+        (uint256 current,,) = _previewDeferredSurplus(accountId);
+        return current;
+    }
+
+    function taxableSurplus(uint256 accountId) public view returns (uint256) {
+        return _positive(netTradeBalance[accountId]) + deferredSurplus(accountId);
+    }
+
     function _curveTax(uint256 P, uint256 deposit, uint256 capacityMultiplier) internal view returns (uint256) {
         if (P == 0) return 0;
         require(deposit > 0, "Deposit required");
@@ -198,28 +215,84 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     }
 
     function _accountCurveTax(uint256 accountId, uint256 positiveBalance) internal view returns (uint256) {
-        if (positiveBalance == 0) return 0;
-        MarketAccount storage account = accounts[accountId];
-        if (account.deposit == 0) return 0;
-        return _curveTax(positiveBalance, account.deposit, account.capacityMultiplier);
+        return _accountCurveTaxWithDeferred(accountId, positiveBalance, deferredSurplus(accountId));
     }
 
-    function _capTaxRefund(uint256 accountId, uint256 requestedRefund) internal view returns (uint256 refund) {
-        uint256 collectedTax = sellerPoints[accountId];
-        uint256 availableQuota = getAvailableQuota(accountId);
-        refund = requestedRefund < collectedTax ? requestedRefund : collectedTax;
-        if (refund > availableQuota) refund = availableQuota;
+    function _accountCurveTaxWithDeferred(uint256 accountId, uint256 positiveBalance, uint256 deferred)
+        internal
+        view
+        returns (uint256)
+    {
+        uint256 taxableP = positiveBalance + deferred;
+        if (taxableP == 0) return 0;
+        MarketAccount storage account = accounts[accountId];
+        if (account.deposit == 0) return 0;
+        return _curveTax(taxableP, account.deposit, account.capacityMultiplier);
+    }
+
+    function _currentResolutionIndex() internal view returns (uint256) {
+        uint256 elapsed = block.timestamp - resolutionIndexUpdatedAt;
+        if (elapsed == 0 || resolutionRatio == 0) return resolutionIndex;
+
+        uint256 scaledRatio = FixedPointMathLib.fullMulDiv(resolutionRatio, WAD, BPS);
+        uint256 indexGrowth = FixedPointMathLib.fullMulDiv(scaledRatio, elapsed, RESOLUTION_PERIOD);
+        return resolutionIndex + indexGrowth;
+    }
+
+    function _previewDeferredSurplus(uint256 accountId)
+        internal
+        view
+        returns (uint256 current, uint256 currentIndex, uint256 remainder)
+    {
+        current = _deferredSurplus[accountId];
+        currentIndex = _currentResolutionIndex();
+        if (current == 0) return (0, currentIndex, 0);
+
+        uint256 accountIndex = _deferredReleaseIndex[accountId];
+        if (currentIndex <= accountIndex) {
+            return (current, currentIndex, _deferredReleaseRemainder[accountId]);
+        }
+
+        uint256 deltaIndex = currentIndex - accountIndex;
+        uint256 deposit = accounts[accountId].deposit;
+        uint256 released = FixedPointMathLib.fullMulDiv(deposit, deltaIndex, WAD);
+        remainder = mulmod(deposit, deltaIndex, WAD) + _deferredReleaseRemainder[accountId];
+        if (remainder >= WAD) {
+            released += 1;
+            remainder -= WAD;
+        }
+
+        if (released >= current) return (0, currentIndex, 0);
+        current -= released;
+    }
+
+    function _syncDeferredSurplus(uint256 accountId) internal returns (uint256 current) {
+        uint256 currentIndex;
+        uint256 remainder;
+        (current, currentIndex, remainder) = _previewDeferredSurplus(accountId);
+        _deferredSurplus[accountId] = current;
+        _deferredReleaseIndex[accountId] = currentIndex;
+        _deferredReleaseRemainder[accountId] = remainder;
+    }
+
+    function _addDeferredSurplus(uint256 accountId, uint256 amount) internal {
+        if (amount == 0) return;
+        uint256 current = _syncDeferredSurplus(accountId);
+        _deferredSurplus[accountId] = current + amount;
+    }
+
+    function _syncResolutionIndex() internal {
+        resolutionIndex = _currentResolutionIndex();
+        resolutionIndexUpdatedAt = block.timestamp;
     }
 
     function _applyTaxRefund(uint256 accountId, uint256 requestedRefund) internal returns (uint256 refund) {
-        refund = _capTaxRefund(accountId, requestedRefund);
+        uint256 collectedTax = sellerPoints[accountId];
+        refund = requestedRefund < collectedTax ? requestedRefund : collectedTax;
         if (refund == 0) return 0;
 
-        uint256 availableQuota = getAvailableQuota(accountId);
         sellerPoints[accountId] -= refund;
         claimed[accountId] += refund;
-        lastAvailableQuota[accountId] = availableQuota - refund;
-        lastClaimTime[accountId] = block.timestamp;
         emit TaxRefunded(accountId, refund);
     }
 
@@ -256,13 +329,20 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         int256 tradeValueInt = _toInt256(calculation.tradeValue);
         int256 oldBuyerBalance = netTradeBalance[buyerAccountId];
         calculation.newBuyerBalance = oldBuyerBalance - tradeValueInt;
-        uint256 newTax = _accountCurveTax(buyerAccountId, _positive(calculation.newBuyerBalance));
+
+        int256 oldSellerBalance = calculation.newSellerBalance - tradeValueInt;
+        uint256 buyerSurplusReduced = _positive(oldBuyerBalance) - _positive(calculation.newBuyerBalance);
+        uint256 sellerDeficitReduced =
+            _negativeMagnitude(oldSellerBalance) - _negativeMagnitude(calculation.newSellerBalance);
+        calculation.resolvedSurplus =
+            buyerSurplusReduced < sellerDeficitReduced ? buyerSurplusReduced : sellerDeficitReduced;
+
+        uint256 newDeferred = deferredSurplus(buyerAccountId) + calculation.resolvedSurplus;
+        uint256 newTax =
+            _accountCurveTaxWithDeferred(buyerAccountId, _positive(calculation.newBuyerBalance), newDeferred);
         uint256 collectedTax = sellerPoints[buyerAccountId];
         uint256 requestedRefund = collectedTax > newTax ? collectedTax - newTax : 0;
-        calculation.buyerRefund = _capTaxRefund(buyerAccountId, requestedRefund);
-        if (calculation.buyerRefund > calculation.tradeValue) {
-            calculation.buyerRefund = calculation.tradeValue;
-        }
+        calculation.buyerRefund = requestedRefund < calculation.tradeValue ? requestedRefund : calculation.tradeValue;
     }
 
     function registerMerchant(address merchant, uint256 amount, uint256 capacityMultiplier)
@@ -295,6 +375,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         MarketAccount storage account = accounts[accountId];
         require(account.isActive, "Merchant account not active");
 
+        _syncDeferredSurplus(accountId);
         settlementAsset.pull(msg.sender, amount);
         account.deposit += amount;
 
@@ -309,10 +390,10 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         uint256 oldMultiplier = account.capacityMultiplier;
         require(newMultiplier <= oldMultiplier, "Multiplier can only decrease");
 
-        uint256 positiveBalance = _positive(netTradeBalance[accountId]);
-        if (positiveBalance > 0) {
+        uint256 taxableP = taxableSurplus(accountId);
+        if (taxableP > 0) {
             uint256 capacity = FixedPointMathLib.fullMulDiv(account.deposit, newMultiplier, BPS);
-            require(positiveBalance <= capacity, "Capacity exceeded");
+            require(taxableP <= capacity, "Capacity exceeded");
         }
 
         account.capacityMultiplier = newMultiplier;
@@ -350,6 +431,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
 
         netTradeBalance[sellerAccountId] = calculation.newSellerBalance;
         netTradeBalance[buyerAccountId] = calculation.newBuyerBalance;
+        _addDeferredSurplus(buyerAccountId, calculation.resolvedSurplus);
 
         if (calculation.buyerRefund > 0) {
             calculation.buyerRefund = _applyTaxRefund(buyerAccountId, calculation.buyerRefund);
@@ -397,18 +479,6 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         );
     }
 
-    function getAvailableQuota(uint256 accountId) public view returns (uint256) {
-        uint256 deposit = accounts[accountId].deposit;
-        if (deposit == 0) return 0;
-        uint256 maxQuota = FixedPointMathLib.fullMulDiv(deposit, quotaRatio, BPS);
-        if (lastClaimTime[accountId] == 0) return maxQuota;
-        uint256 timePassed = block.timestamp - lastClaimTime[accountId];
-        if (timePassed >= QUOTA_PERIOD) return maxQuota;
-        uint256 recovered = FixedPointMathLib.fullMulDiv(maxQuota, timePassed, QUOTA_PERIOD);
-        uint256 total = lastAvailableQuota[accountId] + recovered;
-        return total > maxQuota ? maxQuota : total;
-    }
-
     function kickMerchant(uint256 accountId) external nonReentrant {
         require(msg.sender == governance, "Only governance");
         MarketAccount memory account = accounts[accountId];
@@ -420,8 +490,9 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         delete sellerPoints[accountId];
         delete claimed[accountId];
         delete netTradeBalance[accountId];
-        delete lastClaimTime[accountId];
-        delete lastAvailableQuota[accountId];
+        delete _deferredSurplus[accountId];
+        delete _deferredReleaseIndex[accountId];
+        delete _deferredReleaseRemainder[accountId];
 
         settlementAsset.push(vault, slashedAmount);
         emit TradeBalanceUpdated(accountId, 0);
@@ -436,8 +507,10 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         executor = _executor;
     }
 
-    function setQuotaParams(uint256 _newRatio) external onlyOwner {
-        quotaRatio = _newRatio;
+    function setResolutionParams(uint256 _newRatio) external onlyOwner {
+        require(_newRatio <= BPS, "Invalid resolution ratio");
+        _syncResolutionIndex();
+        resolutionRatio = _newRatio;
     }
 
     function setGlobalAMMParams(uint256 _baseTaxRate, uint256 _curveExponent) external onlyOwner {

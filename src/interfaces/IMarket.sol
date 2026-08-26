@@ -23,6 +23,10 @@ interface IMarket {
 
     function netTradeBalance(uint256 accountId) external view returns (int256);
 
+    function deferredSurplus(uint256 accountId) external view returns (uint256);
+
+    function taxableSurplus(uint256 accountId) external view returns (uint256);
+
     function registerMerchant(address merchant, uint256 amount, uint256 capacityMultiplier)
         external
         returns (uint256 accountId);
