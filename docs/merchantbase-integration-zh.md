@@ -100,7 +100,31 @@ uint256 accountId = market.registerMerchant(
 - `Market.setCapacityMultiplier(accountId, newMultiplier)`：仅该 Account Owner 可以调用，只能保持或降低乘数，最低 10000，并满足当前应税顺差容量要求。
 - MerchantBase 当前设计预期同一账户参与期间保持乘数不变，但 **基类没有在链上冻结乘数**。如果 owner 修改乘数，后续吸收和释放会使用新乘数桶，旧桶不会迁移。接入方必须协调这一约束，不能认为改乘数会自动搬迁额度。
 
-押金退出申请及等待六个月后提取的流程尚未实现。
+### 2.4 押金退出：申请后等待 180 天
+
+由账户 owner 直接调用 Market，而不是调用 MerchantBase：
+
+```solidity
+market.requestDepositWithdrawal(accountId);
+(uint256 amount, uint256 availableAt) = market.depositWithdrawals(accountId);
+// block.timestamp >= availableAt 后，由同一个账户 owner 调用：
+market.withdrawDeposit(accountId);
+```
+
+申请要求账户已激活、有有效押金，同时 `netTradeBalance <= 0`、当前 `deferredSurplus == 0`。尚未释放完的延迟顺差不能通过申请退出清除；`sellerPoints` 可以保留到到期领取时结算。
+
+- 申请一次退出全部押金；有效 `deposit` 立即归零，资金转为待退记录，不再提供顺差容量或延迟顺差释放能力。等待期固定为 `180 days`，不是按自然月计算。
+- 账户 ID、owner、merchant、乘数和已有经济账本保留；`isActive` 不会变为 false，但 `isAccountFrozen(accountId)` 立即变为 true。冻结账户不能作为买方付款或卖方收款，即使收款只用于补平逆差也不允许。
+- 第三方代付、merchant 为 owner 消费、传入 ID 0 复用冻结默认账户，都受相同检查。冻结按账户 ID 隔离，不冻结共享 merchant 地址的其他账户。
+- 冻结期间不可增押、修改乘数或通过 registerMerchant 重注册该账户；待退申请不可重复。当前没有取消申请、解冻或部分退押接口。
+- 到期后仅账户 owner 可以发起领取。押金本金固定转给 **账户 owner**，第三方曾追加的押金也一并退给该 owner，不按历史付款人拆分；剩余 `sellerPoints` 则直接转给 **merchant**。
+- 待退押金到期但尚未领取时，仍可被治理踢出罚没；踢出会同时删除待退记录，之后不能再次领取。
+- `sellerPoints` 在真实顺差和延迟顺差归零后仍可能残留：例如此前由第三方代付，未满足使用退税的身份条件；或者延迟顺差刚随时间释放完，尚未发生下一笔授权消费来触发退款。申请后这部分资金随账户冻结，领取时不再要求通过消费触发，而是直接退给 merchant。
+- 领取成功后删除 Market 账户、`accountIdOf(owner, merchant)` 和该 ID 的经济记录，owner–merchant 对重新回到未注册状态。以后重新注册会取得新的 accountId。MerchantBase 自己保存的 owner/multiplier 流量桶不属于 Market，不会随 Market 账户删除而重置。
+
+前端不能只检查 `isActive` 判断账户能否交易，还应检查 `isAccountFrozen(accountId)`；使用 `depositWithdrawals(accountId)` 展示待退金额和到期时间。领取后账户和冻结标记一起删除。退给 owner 的本金不经过 MerchantBase.tradeIn，也不会增加平台的 received 桶。
+
+Market 会发出 `DepositWithdrawalRequested(accountId, owner, amount, availableAt)` 和 `DepositWithdrawn(accountId, recipient, amount)` 事件，供链下跟踪申请和领取状态；若领取时一并退还了 `sellerPoints`，还会发出 `TaxRefunded(accountId, amount)`。
 
 ## 3. 用户向平台付款：调用 Market，不直接调用 tradeIn
 

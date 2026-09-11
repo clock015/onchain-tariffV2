@@ -86,8 +86,23 @@ contributes 100 normalized votes. ProportionalElection reads the SeatToken's
 existing ERC20Votes total-supply checkpoints; later creation, burning, or
 reminting cannot rewrite that timestamp's weight. At most five rounds are read.
 
-**Planned Deposit Exit**:
-A future exit request is intended to require a zero or negative real net trade
-balance, followed by a six-month delay before deposit withdrawal. This flow is
-not implemented. Eligibility during that delay, Deferred Surplus treatment,
-and pending tariff settlement remain to be specified before implementation.
+**Deposit Withdrawal**:
+Only the Account Owner may request withdrawal of the entire effective deposit.
+The real net trade balance must be nonpositive and current Deferred Surplus must
+be zero. The request moves all deposit into a pending withdrawal with a
+fixed 180-day delay; it immediately stops providing capacity or deferred release.
+The account retains its registered/active identity, multiplier and deficit,
+but isAccountFrozen becomes true immediately. Frozen accounts cannot participate
+on either side of a trade, including third-party payments and ID-zero default
+account resolution. Deposit increases and multiplier changes are also blocked.
+The freeze persists until the pending withdrawal is claimed. Only the Account
+Owner may claim, and the principal is paid to that Owner, not Merchant,
+including amounts previously contributed by third parties. Collected tariff is
+not part of the principal withdrawal. Any collected tariff remaining when the
+claim matures is paid directly to the Merchant. Governance kicks before the
+claim slash the pending deposit and collected tariff, deleting the pending claim
+and frozen flag along with the account. There is currently no
+unfreeze/cancellation entry point. Successful
+withdrawal deletes the Market Account and its pair mapping, returning the pair
+to an unregistered state. Re-registration creates a fresh ID; MerchantBase flow
+buckets are external to Market and are not reset by this deletion.

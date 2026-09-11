@@ -33,6 +33,14 @@ interface IMarket {
 
     function addDeposit(uint256 accountId, uint256 amount) external;
 
+    function depositWithdrawals(uint256 accountId) external view returns (uint256 amount, uint256 availableAt);
+
+    function isAccountFrozen(uint256 accountId) external view returns (bool);
+
+    function requestDepositWithdrawal(uint256 accountId) external;
+
+    function withdrawDeposit(uint256 accountId) external;
+
     function setCapacityMultiplier(uint256 accountId, uint256 newMultiplier) external;
 
     function trade(

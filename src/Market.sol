@@ -17,6 +17,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     uint256 public constant MIN_CAPACITY_MULTIPLIER = BPS;
     uint256 public constant MAX_CURVE_EXPONENT = 10;
     uint256 public constant RESOLUTION_PERIOD = 30 days;
+    uint256 public constant DEPOSIT_WITHDRAWAL_DELAY = 180 days;
 
     ISettlementAsset public settlementAsset;
     IRightsToken public buyerRights;
@@ -44,6 +45,11 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         int256 newBuyerBalance;
     }
 
+    struct DepositWithdrawal {
+        uint256 amount;
+        uint256 availableAt;
+    }
+
     uint256 public nextAccountId;
     mapping(uint256 => MarketAccount) public accounts;
     mapping(address => mapping(address => uint256)) public accountIdOf;
@@ -60,6 +66,10 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     uint256 public resolutionIndexUpdatedAt;
     uint256 public baseTaxRate;
     uint256 public curveExponent;
+
+    // Append new storage: pending funds no longer provide capacity or release deferred surplus.
+    mapping(uint256 => DepositWithdrawal) public depositWithdrawals;
+    mapping(uint256 => bool) public isAccountFrozen;
 
     modifier notFromExecutor() {
         require(msg.sender != executor, "Executor cannot trigger trade");
@@ -78,6 +88,10 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         uint256 indexed accountId, address indexed payer, uint256 amount, uint256 totalDeposit
     );
     event CapacityMultiplierUpdated(uint256 indexed accountId, uint256 oldMultiplier, uint256 newMultiplier);
+    event DepositWithdrawalRequested(
+        uint256 indexed accountId, address indexed owner, uint256 amount, uint256 availableAt
+    );
+    event DepositWithdrawn(uint256 indexed accountId, address indexed recipient, uint256 amount);
     event Traded(
         address indexed payer,
         address indexed buyer,
@@ -311,6 +325,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     function _calculateSellerTrade(uint256 sellerAccountId, TradeCalculation memory calculation) internal view {
         MarketAccount storage account = accounts[sellerAccountId];
         require(account.isActive, "Merchant account not active");
+        require(!isAccountFrozen[sellerAccountId], "Account frozen");
         require(calculation.tradeValue > 0, "Invalid trade value");
 
         int256 tradeValueInt = _toInt256(calculation.tradeValue);
@@ -374,6 +389,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         require(amount > 0, "Deposit required");
         MarketAccount storage account = accounts[accountId];
         require(account.isActive, "Merchant account not active");
+        require(!isAccountFrozen[accountId], "Account frozen");
 
         _syncDeferredSurplus(accountId);
         settlementAsset.pull(msg.sender, amount);
@@ -382,10 +398,57 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         emit MerchantDepositIncreased(accountId, msg.sender, amount, account.deposit);
     }
 
+    function requestDepositWithdrawal(uint256 accountId) external nonReentrant {
+        MarketAccount storage account = accounts[accountId];
+        require(account.isActive, "Merchant account not active");
+        require(msg.sender == account.owner, "Only account owner");
+        require(depositWithdrawals[accountId].amount == 0, "Deposit withdrawal pending");
+        require(account.deposit > 0, "Deposit required");
+        require(netTradeBalance[accountId] <= 0, "Outstanding surplus");
+        require(_syncDeferredSurplus(accountId) == 0, "Outstanding deferred surplus");
+
+        uint256 amount = account.deposit;
+        uint256 availableAt = block.timestamp + DEPOSIT_WITHDRAWAL_DELAY;
+        account.deposit = 0;
+        depositWithdrawals[accountId] = DepositWithdrawal(amount, availableAt);
+        isAccountFrozen[accountId] = true;
+
+        // Keep historical state, but freeze both trade directions even after the principal is claimed.
+        emit DepositWithdrawalRequested(accountId, account.owner, amount, availableAt);
+    }
+
+    function withdrawDeposit(uint256 accountId) external nonReentrant {
+        MarketAccount memory account = accounts[accountId];
+        require(msg.sender == account.owner, "Only account owner");
+        DepositWithdrawal memory withdrawal = depositWithdrawals[accountId];
+        require(withdrawal.amount > 0, "No deposit withdrawal");
+        require(block.timestamp >= withdrawal.availableAt, "Deposit withdrawal not ready");
+
+        uint256 tariffRefund = sellerPoints[accountId];
+        delete accountIdOf[account.owner][account.merchant];
+        delete accounts[accountId];
+        delete sellerPoints[accountId];
+        delete claimed[accountId];
+        delete netTradeBalance[accountId];
+        delete _deferredSurplus[accountId];
+        delete _deferredReleaseIndex[accountId];
+        delete _deferredReleaseRemainder[accountId];
+        delete depositWithdrawals[accountId];
+        delete isAccountFrozen[accountId];
+        settlementAsset.push(account.owner, withdrawal.amount);
+        if (tariffRefund > 0) {
+            settlementAsset.push(account.merchant, tariffRefund);
+            emit TaxRefunded(accountId, tariffRefund);
+        }
+        emit TradeBalanceUpdated(accountId, 0);
+        emit DepositWithdrawn(accountId, account.owner, withdrawal.amount);
+    }
+
     function setCapacityMultiplier(uint256 accountId, uint256 newMultiplier) external {
         MarketAccount storage account = accounts[accountId];
         require(account.isActive, "Merchant account not active");
         require(msg.sender == account.owner, "Only account owner");
+        require(!isAccountFrozen[accountId], "Account frozen");
         require(newMultiplier >= MIN_CAPACITY_MULTIPLIER, "Invalid capacity multiplier");
         uint256 oldMultiplier = account.capacityMultiplier;
         require(newMultiplier <= oldMultiplier, "Multiplier can only decrease");
@@ -412,6 +475,7 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
 
         buyerAccountId = _resolveBuyerAccount(buyer, buyerAccountId);
         require(buyerAccountId != sellerAccountId, "Self trade not allowed");
+        require(!isAccountFrozen[buyerAccountId], "Account frozen");
 
         MarketAccount storage buyerAccount = accounts[buyerAccountId];
         MarketAccount storage sellerAccount = accounts[sellerAccountId];
@@ -484,7 +548,9 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         MarketAccount memory account = accounts[accountId];
         require(account.isActive, "Merchant account not active");
 
-        uint256 slashedAmount = account.deposit + sellerPoints[accountId];
+        uint256 slashedAmount = account.deposit + depositWithdrawals[accountId].amount + sellerPoints[accountId];
+        delete depositWithdrawals[accountId];
+        delete isAccountFrozen[accountId];
         delete accountIdOf[account.owner][account.merchant];
         delete accounts[accountId];
         delete sellerPoints[accountId];
