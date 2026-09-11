@@ -63,3 +63,31 @@ down while the Market Account exists, and cannot be below 10,000. Funds booked
 to an active buyer account may only flow to a seller account with an equal or
 lower multiplier; Default Buyer Accounts represent unrestricted external funds.
 _Avoid_: Global capacity
+
+**Merchant Release Shares**:
+The MerchantBase instance fixes Account Owner and Business shares at
+initialization, in basis points adding to 10,000. Both flow views retain raw
+received amounts. Each release is capped by floor(cumulative received * its
+share / 10,000) minus cumulative released. Fixed shares prevent reallocating
+already-spent historical receipts. These limits account for economic flows;
+they do not attach a multiplier label to each ERC20 unit after settlement.
+
+**Governance Participation**:
+Quorum counts only explicitly cast For, Against, and Abstain votes. Participation
+is summed separately on buyer and seller sides, then the smaller side is used.
+Uncast voting power contributes nothing. The proposal success ratio remains
+effective For >= twice effective Against, with positive effective For required.
+Only Active proposals accept votes. Timelock proposal and cancellation roles
+belong to the Governor after deployment; the deployer has no direct such role.
+
+**Historical Total Voting Weight**:
+Each active annual SeatToken with nonzero supply at the queried past timestamp
+contributes 100 normalized votes. ProportionalElection reads the SeatToken's
+existing ERC20Votes total-supply checkpoints; later creation, burning, or
+reminting cannot rewrite that timestamp's weight. At most five rounds are read.
+
+**Planned Deposit Exit**:
+A future exit request is intended to require a zero or negative real net trade
+balance, followed by a six-month delay before deposit withdrawal. This flow is
+not implemented. Eligibility during that delay, Deferred Surplus treatment,
+and pending tariff settlement remain to be specified before implementation.

@@ -255,11 +255,13 @@ contract ProportionalElection is
     function getPastTotalSupply(
         uint256 timepoint
     ) public view override returns (uint256) {
+        require(timepoint < clock(), "Timepoint must be in the past");
         (uint256 start, uint256 end) = getActiveRange(timepoint);
         if (start > end) return 0;
         uint256 activeCount = 0;
         for (uint256 r = start; r <= end; r++) {
-            if (rounds[r].initialized) activeCount++;
+            address token = rounds[r].seatToken;
+            if (token != address(0) && IVotes(token).getPastTotalSupply(timepoint) > 0) activeCount++;
         }
         return activeCount * WEIGHT_PER_YEAR;
     }

@@ -94,8 +94,8 @@ contract DeploySystem is Script {
         // --- 3. 部署 Timelock ---
         TimelockController timelock;
         {
-            address[] memory proposers = new address[](1);
-            proposers[0] = admin;
+            // The deployer configures roles but never receives direct proposal authority.
+            address[] memory proposers = new address[](0);
             address[] memory executors = new address[](1);
             executors[0] = address(0);
             timelock = new TimelockController(0, proposers, executors, admin);

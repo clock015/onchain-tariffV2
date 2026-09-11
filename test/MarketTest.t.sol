@@ -131,8 +131,7 @@ contract MarketTest is Test {
         buyerFactory.setElectionContract(address(buyerElection));
         sellerFactory.setElectionContract(address(sellerElection));
 
-        address[] memory proposers = new address[](1);
-        proposers[0] = admin;
+        address[] memory proposers = new address[](0);
         address[] memory executorsGov = new address[](1);
         executorsGov[0] = address(0);
         timelock = new TimelockController(0, proposers, executorsGov, admin);

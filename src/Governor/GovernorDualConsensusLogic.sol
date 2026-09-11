@@ -15,6 +15,8 @@ abstract contract GovernorDualConsensusLogic is
         uint256 againstVotesA;
         uint256 againstVotesB;
         mapping(address => bool) hasVoted;
+        uint256 abstainVotesA;
+        uint256 abstainVotesB;
     }
 
     struct DualConsensusStorage {
@@ -57,7 +59,7 @@ abstract contract GovernorDualConsensusLogic is
         override
         returns (string memory)
     {
-        return "support=dual-token&quorum=for,abstain";
+        return "support=dual-token&quorum=for,against,abstain";
     }
 
     function _getVotes(
@@ -82,6 +84,7 @@ abstract contract GovernorDualConsensusLogic is
         string memory reason,
         bytes memory params
     ) internal virtual override returns (uint256) {
+        _validateStateBitmap(proposalId, _encodeStateBitmap(ProposalState.Active));
         DualConsensusStorage storage $ = _getDS();
         uint256 timepoint = proposalSnapshot(proposalId);
         uint256 weightA = $.tokenA.getPastVotes(account, timepoint);
@@ -145,6 +148,11 @@ abstract contract GovernorDualConsensusLogic is
             // Against
             vote.againstVotesA += weightA;
             vote.againstVotesB += weightB;
+        } else if (support == 2) {
+            vote.abstainVotesA += weightA;
+            vote.abstainVotesB += weightB;
+        } else {
+            revert GovernorInvalidVoteType();
         }
 
         // 返回该用户在共识模型下的“有效行使权重”
@@ -161,19 +169,12 @@ abstract contract GovernorDualConsensusLogic is
     {
         DualConsensusStorage storage $ = _getDS();
         ProposalVote storage vote = $.proposalVotes[proposalId];
-        uint256 timepoint = proposalSnapshot(proposalId);
         uint256 effectiveFor = Math.min(vote.forVotesA, vote.forVotesB);
         uint256 effectiveAgainst = Math.min(
             vote.againstVotesA,
             vote.againstVotesB
         );
-        uint256 totalPot = Math.min(
-            $.tokenA.getPastTotalSupply(timepoint),
-            $.tokenB.getPastTotalSupply(timepoint)
-        );
-        uint256 effectiveAbstain = totalPot > (effectiveFor + effectiveAgainst)
-            ? totalPot - effectiveFor - effectiveAgainst
-            : 0;
+        uint256 effectiveAbstain = Math.min(vote.abstainVotesA, vote.abstainVotesB);
         return (effectiveAgainst, effectiveFor, effectiveAbstain);
     }
 
@@ -187,8 +188,12 @@ abstract contract GovernorDualConsensusLogic is
     function _quorumReached(
         uint256 proposalId
     ) internal view virtual override returns (bool) {
-        (, uint256 f, uint256 ab) = proposalVotes(proposalId);
-        return (f + ab) >= quorum(proposalSnapshot(proposalId));
+        ProposalVote storage vote = _getDS().proposalVotes[proposalId];
+        uint256 participated = Math.min(
+            vote.forVotesA + vote.againstVotesA + vote.abstainVotesA,
+            vote.forVotesB + vote.againstVotesB + vote.abstainVotesB
+        );
+        return participated >= quorum(proposalSnapshot(proposalId));
     }
 
     function hasVoted(
