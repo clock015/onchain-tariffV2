@@ -59,7 +59,7 @@ _Avoid_: Seller points
 
 **Capacity Multiplier**:
 A per-account capacity parameter expressed in basis points. It may only move
-down while the Market Account exists, and cannot be below 10,000. Funds booked
+down while the Market Account exists, and cannot be below 1,000. Funds booked
 to an active buyer account may only flow to a seller account with an equal or
 lower multiplier; Default Buyer Accounts represent unrestricted external funds.
 _Avoid_: Global capacity
@@ -99,9 +99,12 @@ The freeze persists until the pending withdrawal is claimed. Only the Account
 Owner may claim, and the principal is paid to that Owner, not Merchant,
 including amounts previously contributed by third parties. Collected tariff is
 not part of the principal withdrawal. Any collected tariff remaining when the
-claim matures is paid directly to the Merchant. Governance kicks before the
-claim slash the pending deposit and collected tariff, deleting the pending claim
-and frozen flag along with the account. There is currently no
+claim matures is paid directly to the Merchant. A governance kick deletes the
+pending claim and frozen flag along with the account, but it may slash no more
+than the account's current Taxable Surplus. Effective deposit is consumed before
+collected tariff when satisfying that limit. Any unused effective deposit, including a
+pending withdrawal, is paid immediately to the Account Owner, and any unused
+collected tariff is paid immediately to the Merchant. There is currently no
 unfreeze/cancellation entry point. Successful
 withdrawal deletes the Market Account and its pair mapping, returning the pair
 to an unregistered state. Re-registration creates a fresh ID; MerchantBase flow

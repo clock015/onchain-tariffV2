@@ -14,7 +14,7 @@ import "./interfaces/ISettlementAsset.sol";
 contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, ReentrancyGuardTransient {
     uint256 public constant BPS = 10000;
     uint256 public constant WAD = 1e18;
-    uint256 public constant MIN_CAPACITY_MULTIPLIER = BPS;
+    uint256 public constant MIN_CAPACITY_MULTIPLIER = 1000;
     uint256 public constant MAX_CURVE_EXPONENT = 10;
     uint256 public constant RESOLUTION_PERIOD = 30 days;
     uint256 public constant DEPOSIT_WITHDRAWAL_DELAY = 180 days;
@@ -115,7 +115,12 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
     event TradeBalanceUpdated(uint256 indexed accountId, int256 netTradeBalance);
     event TaxRefunded(uint256 indexed accountId, uint256 amount);
     event MerchantKicked(
-        uint256 indexed accountId, address indexed owner, address indexed merchant, uint256 slashedAmount
+        uint256 indexed accountId,
+        address indexed owner,
+        address indexed merchant,
+        uint256 slashedAmount,
+        uint256 ownerRefund,
+        uint256 merchantRefund
     );
 
     constructor() {
@@ -548,7 +553,17 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         MarketAccount memory account = accounts[accountId];
         require(account.isActive, "Merchant account not active");
 
-        uint256 slashedAmount = account.deposit + depositWithdrawals[accountId].amount + sellerPoints[accountId];
+        uint256 depositAmount = account.deposit + depositWithdrawals[accountId].amount;
+        uint256 tariffAmount = sellerPoints[accountId];
+        uint256 heldAmount = depositAmount + tariffAmount;
+        uint256 surplus = taxableSurplus(accountId);
+        uint256 slashedAmount = surplus < heldAmount ? surplus : heldAmount;
+
+        // Deposit is the account's collateral; preserve refundable merchant tariff until collateral is exhausted.
+        uint256 slashedDeposit = depositAmount < slashedAmount ? depositAmount : slashedAmount;
+        uint256 ownerRefund = depositAmount - slashedDeposit;
+        uint256 merchantRefund = tariffAmount - (slashedAmount - slashedDeposit);
+
         delete depositWithdrawals[accountId];
         delete isAccountFrozen[accountId];
         delete accountIdOf[account.owner][account.merchant];
@@ -561,8 +576,11 @@ contract Market is Initializable, OwnableUpgradeable, UUPSUpgradeable, Reentranc
         delete _deferredReleaseRemainder[accountId];
 
         settlementAsset.push(vault, slashedAmount);
+        settlementAsset.push(account.owner, ownerRefund);
+        settlementAsset.push(account.merchant, merchantRefund);
+        if (merchantRefund > 0) emit TaxRefunded(accountId, merchantRefund);
         emit TradeBalanceUpdated(accountId, 0);
-        emit MerchantKicked(accountId, account.owner, account.merchant, slashedAmount);
+        emit MerchantKicked(accountId, account.owner, account.merchant, slashedAmount, ownerRefund, merchantRefund);
     }
 
     function setVault(address _newVault) external onlyOwner {

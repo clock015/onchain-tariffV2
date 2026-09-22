@@ -360,18 +360,23 @@ contract DepositWithdrawalTest is Test {
         assertEq(market.claimed(id), 0);
     }
 
-    function testKickSlashesPendingDepositAndResidualTariff() public {
+    function testKickRefundsPendingDepositAndResidualTariffAtZeroSurplus() public {
         uint256 id = _register(alice, bob, 40000);
         uint256 other = _register(carol, carol, 40000);
         _trade(carol, carol, other, id, 100e6);
         _trade(carol, alice, id, other, 200e6);
         vm.warp(block.timestamp + 7 days);
         uint256 tariff = market.sellerPoints(id);
+        assertEq(market.taxableSurplus(id), 0);
         assertGt(tariff, 0);
         _request(id, alice);
-        uint256 before = token.balanceOf(vault);
+        uint256 vaultBefore = token.balanceOf(vault);
+        uint256 ownerBefore = token.balanceOf(alice);
+        uint256 merchantBefore = token.balanceOf(bob);
         market.kickMerchant(id);
-        assertEq(token.balanceOf(vault) - before, DEPOSIT + tariff);
+        assertEq(token.balanceOf(vault), vaultBefore);
+        assertEq(token.balanceOf(alice) - ownerBefore, DEPOSIT);
+        assertEq(token.balanceOf(bob) - merchantBefore, tariff);
         assertEq(market.accountIdOf(alice, bob), 0);
         assertFalse(market.isAccountFrozen(id));
         (uint256 pending, uint256 deadline) = market.depositWithdrawals(id);
@@ -388,6 +393,47 @@ contract DepositWithdrawalTest is Test {
         (pending, deadline) = market.depositWithdrawals(fresh);
         assertEq(pending, 0);
         assertEq(deadline, 0);
+    }
+
+    function testKickSlashesOwnerDepositBeforeMerchantTariff() public {
+        uint256 id = _register(alice, bob, 40000);
+        _trade(carol, carol, 0, id, 100e6);
+
+        uint256 surplus = market.taxableSurplus(id);
+        uint256 tariff = market.sellerPoints(id);
+        assertLt(surplus, DEPOSIT);
+        assertGt(tariff, 0);
+
+        uint256 vaultBefore = token.balanceOf(vault);
+        uint256 ownerBefore = token.balanceOf(alice);
+        uint256 merchantBefore = token.balanceOf(bob);
+        market.kickMerchant(id);
+
+        assertEq(token.balanceOf(vault) - vaultBefore, surplus);
+        assertEq(token.balanceOf(alice) - ownerBefore, DEPOSIT - surplus);
+        assertEq(token.balanceOf(bob) - merchantBefore, tariff);
+        assertEq(market.accountIdOf(alice, bob), 0);
+    }
+
+    function testKickCannotSlashMoreThanHeldFunds() public {
+        uint256 id = _register(alice, bob, 40000);
+        _trade(carol, carol, 0, id, 3500e6);
+
+        uint256 tariff = market.sellerPoints(id);
+        uint256 held = DEPOSIT + tariff;
+        assertGt(market.taxableSurplus(id), held);
+
+        uint256 vaultBefore = token.balanceOf(vault);
+        uint256 ownerBefore = token.balanceOf(alice);
+        uint256 merchantBefore = token.balanceOf(bob);
+        market.kickMerchant(id);
+
+        assertEq(token.balanceOf(vault) - vaultBefore, held);
+        assertEq(token.balanceOf(alice), ownerBefore);
+        assertEq(token.balanceOf(bob), merchantBefore);
+        assertEq(market.accountIdOf(alice, bob), 0);
+        assertEq(market.sellerPoints(id), 0);
+        assertEq(market.taxableSurplus(id), 0);
     }
 
     function testKickAfterWithdrawalCannotSlashPrincipalAgain() public {

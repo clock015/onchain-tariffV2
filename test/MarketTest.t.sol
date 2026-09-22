@@ -233,6 +233,21 @@ contract MarketTest is Test {
         assertEq(market.taxableSurplus(accountId), 0);
     }
 
+    function testMinimumCapacityMultiplierIsOneThousand() public {
+        uint256 accountId = _register(bob, bob, 1000e6, 1000);
+        (,,, uint256 multiplier,) = market.accounts(accountId);
+        assertEq(multiplier, 1000);
+        assertEq(market.MIN_CAPACITY_MULTIPLIER(), 1000);
+
+        vm.startPrank(charlie);
+        usdc.approve(address(settlementAsset), 1000e6);
+        vm.expectRevert("Invalid capacity multiplier");
+        market.registerMerchant(charlie, 1000e6, 999);
+        vm.stopPrank();
+
+        assertEq(market.accountIdOf(charlie, charlie), 0);
+    }
+
     function testZeroBuyerAccountCreatesAndReusesDefaultAccount() public {
         uint256 sellerAccountId = _register(bob, bob, 1000e6);
 
@@ -585,7 +600,7 @@ contract MarketTest is Test {
 
         vm.prank(alice);
         vm.expectRevert("Invalid capacity multiplier");
-        market.setCapacityMultiplier(accountId, 9999);
+        market.setCapacityMultiplier(accountId, 999);
     }
 
     function testMerchantCanChooseWhichOwnersItSupports() public {
@@ -613,8 +628,10 @@ contract MarketTest is Test {
         _trade(charlie, charlie, charlieAccountId, bobAccountId, 50e6);
         _trade(bob, bob, bobAccountId, charlieAccountId, 50e6);
 
+        uint256 surplusBefore = market.taxableSurplus(bobAccountId);
         uint256 pointsBefore = market.sellerPoints(bobAccountId);
         uint256 vaultBalanceBefore = usdc.balanceOf(vault);
+        uint256 bobBalanceBefore = usdc.balanceOf(bob);
         assertEq(market.claimed(bobAccountId), 0);
         assertEq(market.deferredSurplus(bobAccountId), 49.5e6);
 
@@ -634,7 +651,8 @@ contract MarketTest is Test {
         assertEq(market.claimed(bobAccountId), 0);
         assertEq(market.netTradeBalance(bobAccountId), 0);
         assertEq(market.deferredSurplus(bobAccountId), 0);
-        assertEq(usdc.balanceOf(vault) - vaultBalanceBefore, 1000e6 + pointsBefore);
+        assertEq(usdc.balanceOf(vault) - vaultBalanceBefore, surplusBefore);
+        assertEq(usdc.balanceOf(bob) - bobBalanceBefore, 1000e6 + pointsBefore - surplusBefore);
 
         uint256 newAccountId = _register(bob, bob, 100e6);
         assertTrue(newAccountId != bobAccountId);

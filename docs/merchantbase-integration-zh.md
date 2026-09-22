@@ -83,7 +83,7 @@ uint256 accountId = market.registerMerchant(
 );
 ```
 
-押金必须大于零，乘数必须至少为 `10000`。例如 `40000` 对应容量为押金的 4 倍；不同 owner 可以为同一个平台注册不同乘数的账户。
+押金必须大于零，乘数必须至少为 `1000`。例如 `40000` 对应容量为押金的 4 倍；不同 owner 可以为同一个平台注册不同乘数的账户。
 
 可用 `market.accountIdOf(accountOwner, platformProxy)` 查询 ID，再用 `market.accounts(accountId)` 检查：
 
@@ -97,7 +97,7 @@ uint256 accountId = market.registerMerchant(
 ### 2.3 增押与参数维护
 
 - `Market.addDeposit(accountId, amount)`：任何人都可以调用，由调用者全额支付押金；事先向 SettlementAsset 授权。增押不记入 MerchantBase 的 `received`，也不会即时退还关税。
-- `Market.setCapacityMultiplier(accountId, newMultiplier)`：仅该 Account Owner 可以调用，只能保持或降低乘数，最低 10000，并满足当前应税顺差容量要求。
+- `Market.setCapacityMultiplier(accountId, newMultiplier)`：仅该 Account Owner 可以调用，只能保持或降低乘数，最低 1000，并满足当前应税顺差容量要求。
 - MerchantBase 当前设计预期同一账户参与期间保持乘数不变，但 **基类没有在链上冻结乘数**。如果 owner 修改乘数，后续吸收和释放会使用新乘数桶，旧桶不会迁移。接入方必须协调这一约束，不能认为改乘数会自动搬迁额度。
 
 ### 2.4 押金退出：申请后等待 180 天

@@ -62,12 +62,14 @@ effectiveVotes = min(buyerSideVotes, sellerSideVotes)
 
 `Market` 的关键管理权限最终交给治理系统执行。治理可以管理市场规则，也可以处理商家准入后的风险。
 
-当前 `Market` 中最直接的准入治理动作是 `kickMerchant(merchant)`。只有 `governance` 地址可以调用它。商家被踢出后：
+当前 `Market` 中最直接的准入治理动作是 `kickMerchant(accountId)`。只有 `governance` 地址可以调用它。账户被踢出后：
 
-- 商家状态被清空；
-- 商家押金被划入 `vault`；
-- 商家账户下已有的买方积分和卖方积分会被转移给 `vault`；
-- 商家不再是 active merchant，不能继续作为有效交易商家接单。
+- 账户及其 owner–merchant 配对状态被清空；
+- 最多按当前应税顺差数额罚没资金，并先使用押金、押金不足时再使用已扣留关税；
+- 罚没资金进入 `vault`；
+- 剩余押金（包括待退押金）立即退给 Account Owner；
+- 剩余已扣留关税立即退给 Merchant；
+- 该账户不再是 active merchant account，不能继续接单或付款。
 
 也就是说，商家可以通过押金进入市场，但其持续经营资格仍受治理约束。治理权又来自交易贡献，所以市场准入和市场治理形成闭环：活跃参与者获得治理权，治理权再反过来维护市场秩序。
 
