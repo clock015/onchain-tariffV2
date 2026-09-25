@@ -5,6 +5,7 @@ import "forge-std/Script.sol";
 import "forge-std/console.sol";
 import "../src/Market.sol";
 import "../src/TradeExecutor.sol";
+import "../src/Vault.sol";
 import "../src/settlement/ERC20SettlementAsset.sol";
 import "../src/RightsToken/ProportionalElection.sol";
 import "../src/RightsToken/SeatTokenFactory.sol";
@@ -18,7 +19,6 @@ contract DeploySystem is Script {
         uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
         address admin = vm.addr(deployerPrivateKey);
         address underlyingToken = vm.envOr("USDC_ADDRESS", address(0));
-        address vault = vm.envOr("VAULT_ADDRESS", admin);
 
         vm.startBroadcast(deployerPrivateKey);
 
@@ -111,10 +111,13 @@ contract DeploySystem is Script {
                 address(buyerElection),
                 address(sellerElection),
                 address(timelock),
-                vault
+                address(0)
             );
             market = Market(address(new ERC1967Proxy(marketImpl, marketInit)));
         }
+
+        Vault vault = new Vault(address(market));
+        market.setVault(address(vault));
 
         // --- 5. 部署执行器与 FinalGovernor ---
         TradeExecutor executor = new TradeExecutor(
@@ -175,7 +178,7 @@ contract DeploySystem is Script {
             address(sellerElection),
             address(governor),
             address(timelock),
-            vault
+            address(vault)
         );
     }
 
